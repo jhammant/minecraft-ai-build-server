@@ -1,0 +1,157 @@
+:root {
+  --bg: #10131a;
+  --panel: #171b25;
+  --panel-2: #1e2433;
+  --line: #2a3244;
+  --text: #e6e9f0;
+  --muted: #8e98ad;
+  --accent: #5ac36a;
+  --accent-2: #3fa9f5;
+  --danger: #ef5b5b;
+  --radius: 12px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f4f6fa; --panel: #fff; --panel-2: #eef1f7; --line: #d9dfeb;
+    --text: #161a22; --muted: #5d6779;
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* The `hidden` attribute is only a user-agent rule (`[hidden] {display:none}`),
+   so ANY class that sets `display` beats it. `.login` sets `display:grid`, which
+   meant the sign-in panel stayed on screen however the JS set `.hidden`.
+   Make the attribute authoritative. */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+h1, h2, h3 { margin: 0 0 .6rem; line-height: 1.25; }
+h1 { font-size: 1.15rem; }
+h2 { font-size: 1rem; }
+h3 { font-size: .85rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-top: 1.4rem; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+
+.muted { color: var(--muted); }
+.err { color: var(--danger); margin: .5rem 0 0; }
+
+/* ---------- login ---------- */
+.login { display: grid; place-items: center; min-height: 100dvh; padding: 1rem; }
+.login-card { width: min(380px, 100%); display: grid; gap: .6rem; }
+.login-card h1 { text-align: center; margin-bottom: 1rem; }
+
+/* ---------- shell ---------- */
+header {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+  padding: .7rem 1rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+header h1 { margin: 0; }
+header h1 span { display: none; }
+@media (min-width: 560px) { header h1 span { display: inline; } }
+
+.status { display: flex; align-items: center; gap: .45rem; font-size: .85rem; color: var(--muted); }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+.dot.up { background: var(--accent); }
+.dot.down { background: var(--danger); }
+
+nav { margin-left: auto; display: flex; gap: .25rem; }
+nav button {
+  background: transparent; color: var(--muted); border: 1px solid transparent;
+  padding: .4rem .7rem; border-radius: 8px; font: inherit; cursor: pointer;
+}
+nav button:hover { color: var(--text); }
+nav button.active { background: var(--panel-2); color: var(--text); border-color: var(--line); }
+
+.tab { display: none; padding: 1rem; max-width: 1400px; margin: 0 auto; }
+.tab.active { display: block; }
+
+/* ---------- build ---------- */
+.build-layout { display: grid; gap: 1rem; grid-template-columns: 1fr; }
+@media (min-width: 960px) { .build-layout { grid-template-columns: 1.4fr 1fr; } }
+
+.map-wrap { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
+.map-bar {
+  display: flex; align-items: center; gap: .5rem;
+  padding: .5rem .7rem; border-bottom: 1px solid var(--line); background: var(--panel-2);
+}
+.map-bar select { flex: 0 1 14rem; padding: .35rem .5rem; }
+.map-bar label { flex: 0 0 auto; }
+.map-wrap iframe {
+  width: 100%; height: clamp(280px, 46vh, 560px);
+  border: 0; display: block; background: var(--panel-2);
+}
+.map-hint { margin: 0; padding: .7rem .9rem; font-size: .82rem; color: var(--muted); border-top: 1px solid var(--line); }
+
+.build-form { display: grid; gap: .55rem; align-content: start; }
+
+label { font-size: .82rem; color: var(--muted); }
+
+input, textarea, select, button {
+  font: inherit; color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 9px; padding: .55rem .7rem;
+}
+textarea { resize: vertical; }
+input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent-2); outline-offset: 1px; }
+
+button { cursor: pointer; background: var(--accent); color: #06210b; border-color: transparent; font-weight: 600; }
+button:hover:not(:disabled) { filter: brightness(1.08); }
+button:disabled { opacity: .55; cursor: progress; }
+button.secondary { background: var(--panel-2); color: var(--text); border-color: var(--line); font-weight: 500; }
+
+.examples { display: flex; flex-wrap: wrap; gap: .35rem; }
+.chip {
+  background: var(--panel-2); color: var(--muted); border: 1px solid var(--line);
+  font-size: .78rem; font-weight: 500; padding: .3rem .55rem; border-radius: 999px;
+}
+.chip:hover { color: var(--text); }
+
+.where { display: flex; gap: 1rem; flex-wrap: wrap; }
+.radio, .check { display: flex; align-items: center; gap: .4rem; font-size: .85rem; color: var(--text); }
+.coords { display: none; gap: .5rem; align-items: center; flex-wrap: wrap; }
+.coords.show { display: flex; }
+.coords input { width: 6.5rem; }
+.hint { font-size: .78rem; color: var(--muted); }
+
+.result { border-radius: 9px; padding: .7rem .8rem; font-size: .88rem; background: var(--panel-2); border: 1px solid var(--line); }
+.result.ok { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.result.bad { border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); }
+
+.history { margin-top: 1rem; }
+.history ul, #wl-list, #worlds { list-style: none; margin: 0; padding: 0; display: grid; gap: .4rem; }
+.history li, #wl-list li, #worlds li {
+  display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 9px; padding: .5rem .7rem; font-size: .87rem;
+}
+.history li b { font-weight: 600; }
+.history li .when, #worlds li .type { margin-left: auto; color: var(--muted); font-size: .8rem; }
+
+#wl-list li button { background: transparent; color: var(--muted); border: 0; padding: 0 .2rem; margin-left: auto; font-size: 1rem; }
+#wl-list li button:hover { color: var(--danger); }
+
+.prep { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap;
+  padding: .5rem .6rem; background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; }
+.prep button { padding: .35rem .6rem; font-size: .85rem; }
+
+.row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+.row input { flex: 1 1 12rem; }
+
+code { background: var(--panel-2); padding: .1rem .35rem; border-radius: 5px; font-size: .85em; }

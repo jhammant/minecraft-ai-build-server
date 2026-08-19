@@ -1,0 +1,15 @@
+{
+  "name": "mc-ai-builder",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "LLM build assistant for a Minecraft server. Model proposes, validator disposes.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test 'test/*.test.js'"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

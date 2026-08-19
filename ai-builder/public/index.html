@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Minecraft Server</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>⛏️</text></svg>">
+</head>
+<body>
+
+<div id="boot" class="login"><p class="muted">Connecting…</p></div>
+
+<div id="login" class="login" hidden>
+  <form class="card login-card" id="login-form">
+    <h1>⛏️ Minecraft Server</h1>
+    <label for="pw">Password</label>
+    <input id="pw" type="password" autocomplete="current-password" required autofocus>
+    <button type="submit">Sign in</button>
+    <p class="err" id="login-err" hidden></p>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <h1>⛏️ <span>Minecraft</span></h1>
+    <div class="status" id="status">
+      <span class="dot" id="dot"></span>
+      <span id="status-text">connecting…</span>
+    </div>
+    <nav>
+      <button data-tab="build" class="active">Build</button>
+      <button data-tab="players">Players</button>
+      <button data-tab="worlds">Worlds</button>
+    </nav>
+  </header>
+
+  <!-- BUILD -->
+  <section id="tab-build" class="tab active">
+    <div class="build-layout">
+      <div class="map-wrap card">
+        <div class="map-bar">
+          <label for="map-pick">Map</label>
+          <select id="map-pick"><option value="">loading…</option></select>
+          <button type="button" id="map-refresh" class="chip">Refresh</button>
+        </div>
+        <iframe id="map" src="/map/" title="World map"></iframe>
+        <p class="map-hint">
+          Move the map to where you want to build, then press
+          <strong>Build at map centre</strong>. If the map hasn't finished
+          rendering yet, type coordinates instead.
+        </p>
+      </div>
+
+      <form class="card build-form" id="build-form">
+        <h2>Build something</h2>
+
+        <label for="desc">What should I build?</label>
+        <textarea id="desc" rows="3" required
+          placeholder="a wizard tower with a spiral staircase and a glowing crystal on top"></textarea>
+
+        <div class="examples">
+          <button type="button" class="chip">a cosy log cabin with a fireplace</button>
+          <button type="button" class="chip">a pirate ship</button>
+          <button type="button" class="chip">a castle with four towers</button>
+          <button type="button" class="chip">a giant mushroom house</button>
+        </div>
+
+        <label>Where?</label>
+        <div class="where">
+          <label class="radio"><input type="radio" name="where" value="centre" checked>
+            Map centre</label>
+          <label class="radio"><input type="radio" name="where" value="coords">
+            These coordinates</label>
+        </div>
+        <div class="coords" id="coords">
+          <input id="cx" type="number" placeholder="X" inputmode="numeric">
+          <input id="cz" type="number" placeholder="Z" inputmode="numeric">
+          <span class="hint">Y is worked out from the ground</span>
+        </div>
+
+        <label for="who">Build as</label>
+        <input id="who" placeholder="your Minecraft name (optional)">
+
+        <button type="submit" id="go">Build it</button>
+
+        <div class="prep">
+          <span class="hint">Ground not flat enough?</span>
+          <button type="button" id="flatten" class="secondary">Flatten this spot</button>
+          <button type="button" id="clear" class="secondary">Clear this spot</button>
+        </div>
+
+        <button type="button" id="undo" class="secondary">Undo my last build</button>
+
+        <div id="result" class="result" hidden></div>
+      </form>
+    </div>
+
+    <div class="card history">
+      <h2>Recently built</h2>
+      <ul id="history"><li class="muted">nothing yet</li></ul>
+    </div>
+  </section>
+
+  <!-- PLAYERS -->
+  <section id="tab-players" class="tab">
+    <div class="card">
+      <h2>Let a friend in</h2>
+      <p class="muted">
+        Only people on this list can join. Adding someone takes a few seconds.
+      </p>
+      <form id="wl-form" class="row">
+        <input id="wl-name" placeholder="their Minecraft username" required>
+        <label class="check"><input type="checkbox" id="wl-bedrock">
+          They play on console, phone or tablet</label>
+        <button type="submit">Add</button>
+      </form>
+      <p class="err" id="wl-err" hidden></p>
+      <h3>Allowed to join</h3>
+      <ul id="wl-list"><li class="muted">loading…</li></ul>
+    </div>
+  </section>
+
+  <!-- WORLDS -->
+  <section id="tab-worlds" class="tab">
+    <div class="card">
+      <h2>Worlds</h2>
+      <ul id="worlds"><li class="muted">loading…</li></ul>
+      <h3>Make a new world</h3>
+      <form id="world-form" class="row">
+        <input id="world-name" placeholder="name, e.g. skyblock" required>
+        <select id="world-type">
+          <option value="NORMAL">Normal</option>
+          <option value="NETHER">Nether</option>
+          <option value="THE_END">End</option>
+        </select>
+        <button type="submit">Create</button>
+      </form>
+      <p class="muted">In game, hop between worlds with <code>/mv tp &lt;name&gt;</code>.</p>
+    </div>
+  </section>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

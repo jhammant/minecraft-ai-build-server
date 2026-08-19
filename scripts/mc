@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Control the Minecraft server. Set MC_HOST in .env to manage it over ssh.
+#   mc status | start | stop | restart | logs | console | cmd "<command>"
+#   mc whitelist add <name> | whitelist list
+#   mc world add <name> [normal|flat|nether|end] | world list
+#   mc backup | backups
+#   mc test        run the AI-builder end-to-end smoke test
+set -euo pipefail
+
+# Pick up MC_HOST / MC_STACK / MC_DATA_DIR from .env if it's there.
+ENV_FILE="$(cd "$(dirname "$0")/.." && pwd)/.env"
+if [ -f "$ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . <(grep -E '^(MC_HOST|MC_STACK|MC_DATA_DIR)=' "$ENV_FILE" || true)
+fi
+
+# Host running the stack. Set MC_HOST in your shell, or in .env.
+HOST="${MC_HOST:-}"
+STACK="${MC_STACK:-/opt/minecraft/stack}"
+DATA="${MC_DATA_DIR:-/opt/minecraft}"
+
+# Run locally when MC_HOST is unset, over ssh when it is set.
+remote() { if [ -n "$HOST" ]; then ssh "$HOST" "$@"; else sh -c "$*"; fi; }
+compose() { remote "cd $STACK && docker compose $*"; }
+# Send a console command to the server and print its reply.
+rcon() { remote "docker exec minecraft rcon-cli $(printf '%q' "$*")"; }
+
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  status)
+    remote 'docker ps --filter name=minecraft --format "{{.Names}}\t{{.Status}}"'
+    echo
+    rcon list
+    ;;
+  start)   compose "up -d" ;;
+  stop)    compose "stop" ;;
+  restart) compose "restart mc" ;;
+  logs)
+    svc="${1:-mc}"
+    remote "docker logs --tail 120 -f $( [ "$svc" = ai ] && echo minecraft-ai-builder || echo minecraft )"
+    ;;
+  console) if [ -n "$HOST" ]; then ssh -t "$HOST" "docker exec -it minecraft rcon-cli"; else docker exec -it minecraft rcon-cli; fi ;;
+  cmd)     rcon "$@" ;;
+
+  whitelist)
+    sub="${1:-list}"; shift || true
+    case "$sub" in
+      add)    rcon "whitelist add $1"; rcon "whitelist reload" ;;
+      remove) rcon "whitelist remove $1"; rcon "whitelist reload" ;;
+      list|*) rcon "whitelist list" ;;
+    esac
+    ;;
+
+  world)
+    sub="${1:-list}"; shift || true
+    case "$sub" in
+      add)
+        name="$1"; type="${2:-normal}"
+        # Multiverse env names: NORMAL, FLAT, NETHER, END
+        case "$type" in
+          normal) env=NORMAL; gen="" ;;
+          flat)   env=NORMAL; gen="-g flat" ;;
+          nether) env=NETHER; gen="" ;;
+          end)    env=THE_END; gen="" ;;
+          *) echo "unknown world type: $type" >&2; exit 1 ;;
+        esac
+        rcon "mv create $name $env $gen"
+        echo "Created '$name'. Players reach it with: /mv tp $name"
+        ;;
+      list|*) rcon "mv list" ;;
+    esac
+    ;;
+
+  backup)  remote "docker exec minecraft-backup backup now" || compose "restart backup" ;;
+  backups) remote "ls -lht $DATA/backups | head -20" ;;
+
+  test)
+    remote "docker exec minecraft-ai-builder node test/smoke.mjs"
+    ;;
+
+  ""|-h|--help|help) usage ;;
+  *) echo "unknown command: $cmd" >&2; usage ;;
+esac

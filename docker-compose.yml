@@ -1,0 +1,180 @@
+name: minecraft
+
+services:
+  # ---------------------------------------------------------------------------
+  # Paper server. One JVM, many worlds (via Multiverse-Core).
+  # Java players connect on 25565/tcp, Bedrock players on 19132/udp (via Geyser).
+  # ---------------------------------------------------------------------------
+  mc:
+    # Java 25, not 21: Minecraft 26.1+ refuses to start on anything older.
+    image: itzg/minecraft-server:java25
+    container_name: minecraft
+    tty: true
+    stdin_open: true
+    restart: unless-stopped
+    ports:
+      - "25565:25565/tcp"        # Java Edition
+      - "19132:19132/udp"        # Bedrock Edition (Geyser)
+      - "127.0.0.1:25575:25575"  # RCON - localhost only, never exposed
+      # BlueMap's own webserver stays unpublished: the panel proxies it at /map
+      # so the map shares the panel's origin and its login.
+    environment:
+      EULA: "TRUE"
+      TYPE: "PAPER"
+      VERSION: "${MC_VERSION:-26.2}"
+
+      # Memory. If the host has no swap, the hard limit below must exceed the
+      # heap by enough for JVM metaspace/GC overhead, or the container is
+      # OOM-killed rather than swapping.
+      MEMORY: "${MC_HEAP:-4G}"
+      USE_AIKAR_FLAGS: "TRUE"
+
+      # --- Security posture -----------------------------------------------
+      # online-mode verifies every player against Microsoft auth (no spoofing).
+      # whitelist restricts to named accounts. Both stay on: 25565 is publicly
+      # exposed and is mass-scanned continuously.
+      ONLINE_MODE: "TRUE"
+      ENABLE_WHITELIST: "TRUE"
+      ENFORCE_WHITELIST: "TRUE"
+      OPS: "${MC_OPS}"
+      WHITELIST: "${MC_WHITELIST}"
+
+      ENABLE_RCON: "TRUE"
+      RCON_PASSWORD: "${RCON_PASSWORD:?RCON_PASSWORD must be set in .env}"
+
+      # --- Gameplay --------------------------------------------------------
+      DIFFICULTY: "${MC_DIFFICULTY:-normal}"
+      MODE: "${MC_MODE:-survival}"
+      MOTD: "${MC_MOTD:-A server for a very good builder}"
+      MAX_PLAYERS: "${MC_MAX_PLAYERS:-12}"
+      VIEW_DISTANCE: "10"
+      SIMULATION_DISTANCE: "6"
+      SPAWN_PROTECTION: "0"
+      ALLOW_NETHER: "TRUE"
+      ENABLE_COMMAND_BLOCK: "TRUE"
+
+      # --- Plugins ---------------------------------------------------------
+      # Multiverse : lets your kid create worlds in-game with /mv create
+      # LuckPerms  : lets them run /whitelist add WITHOUT full op
+      # CoreProtect: block-level logging, so griefing is /co rollback not a restore
+      # Geyser+Floodgate : Bedrock (iPad/console/Switch) clients on a Java server
+      # ViaVersion : friends on slightly older clients can still join
+      # BlueMap    : 3D web map, served through the panel at /map
+      # Chunky     : pre-generates terrain so there is a world to look at -
+      #              Minecraft only creates land as players walk into it
+      MODRINTH_PROJECTS: |
+        multiverse-core
+        luckperms
+        coreprotect
+        viaversion
+        bluemap
+        chunky
+      MODRINTH_DOWNLOAD_DEPENDENCIES: "required"
+
+      # Geyser/Floodgate come straight from GeyserMC rather than Modrinth.
+      # Modrinth only carries *beta* Geyser builds for Minecraft 26.2, and the
+      # installer filters to releases, so it crash-loops. These "latest" URLs
+      # are the project's own canonical endpoint and always resolve.
+      PLUGINS: |
+        https://download.geysermc.org/v2/projects/geyser/versions/latest/builds/latest/downloads/spigot
+        https://download.geysermc.org/v2/projects/floodgate/versions/latest/builds/latest/downloads/spigot
+
+      TZ: "${TZ:-Europe/London}"
+      OVERRIDE_SERVER_PROPERTIES: "TRUE"
+    volumes:
+      - ${MC_DATA:-/mnt/tank/apps/minecraft}/data:/data
+    healthcheck:
+      test: ["CMD", "mc-health"]
+      start_period: 5m
+      interval: 30s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          memory: ${MC_MEM_LIMIT:-6G}
+
+  # ---------------------------------------------------------------------------
+  # Rolling backups. Keeps the world safe independently of ZFS snapshots.
+  # ---------------------------------------------------------------------------
+  backup:
+    image: itzg/mc-backup
+    container_name: minecraft-backup
+    restart: unless-stopped
+    environment:
+      BACKUP_INTERVAL: "${BACKUP_INTERVAL:-6h}"
+      PRUNE_BACKUPS_DAYS: "${PRUNE_BACKUPS_DAYS:-14}"
+      RCON_HOST: "mc"
+      RCON_PASSWORD: "${RCON_PASSWORD}"
+      INITIAL_DELAY: "5m"
+      TZ: "${TZ:-Europe/London}"
+    volumes:
+      - ${MC_DATA:-/mnt/tank/apps/minecraft}/data:/data:ro
+      - ${MC_DATA:-/mnt/tank/apps/minecraft}/backups:/backups
+    depends_on:
+      mc:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # AI build assistant. Watches chat for "!build ...", asks an LLM for a
+  # STRUCTURED build plan, validates it, then executes it over RCON.
+  # The model never emits a command that gets run - it emits data we check.
+  # ---------------------------------------------------------------------------
+  ai-builder:
+    build: ./ai-builder
+    image: mc-ai-builder:latest
+    container_name: minecraft-ai-builder
+    restart: unless-stopped
+    # Must match the owner of the state directory on the host, or the builder
+    # cannot save undo snapshots or build history.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "${WEB_BIND:-0.0.0.0}:${WEB_PUBLIC_PORT:-8080}:8080"
+    environment:
+      RCON_HOST: "mc"
+      RCON_PORT: "25575"
+      RCON_PASSWORD: "${RCON_PASSWORD}"
+      MC_LOG: "/data/logs/latest.log"
+
+      # Web panel
+      WEB_PORT: "8080"
+      WEB_PASSWORD: "${WEB_PASSWORD:?WEB_PASSWORD must be set in .env}"
+      WEB_TRUST_PROXY_HEADER: "${WEB_TRUST_PROXY_HEADER:-}"
+      # Reverse proxies whose X-Forwarded-For we believe. Without this, a proxy
+      # in front would make every request look like it came from the LAN.
+      WEB_TRUSTED_PROXIES: "${WEB_TRUSTED_PROXIES:-}"
+      MAP_INTERNAL_URL: "http://mc:8100"
+
+      # Pluggable LLM backend: openrouter | lmstudio
+      LLM_BACKEND: "${LLM_BACKEND:-openrouter}"
+      LLM_MODEL: "${LLM_MODEL:-moonshotai/kimi-k2.6}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      OPENROUTER_BASE_URL: "${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
+      LMSTUDIO_BASE_URL: "${LMSTUDIO_BASE_URL:-}"
+      LMSTUDIO_MODEL: "${LMSTUDIO_MODEL:-qwen/qwen3-coder-next}"
+
+      # Safety envelope. The validator rejects any plan that breaches these.
+      MAX_BLOCKS: "${AI_MAX_BLOCKS:-400000}"
+      MAX_OPS: "${AI_MAX_OPS:-400}"
+      # Lava, fire and TNT: destructive but legitimate building materials.
+      # Command blocks and the like stay banned regardless - those are a
+      # privilege-escalation path, not a gameplay choice.
+      ALLOW_HAZARD_BLOCKS: "${AI_ALLOW_HAZARD_BLOCKS:-false}"
+      MAX_EXTENT: "${AI_MAX_EXTENT:-120}"
+      MAX_BUILDS_PER_HOUR: "${AI_MAX_BUILDS_PER_HOUR:-20}"
+      MAX_BUILDS_PER_HOUR_GLOBAL: "${AI_MAX_BUILDS_PER_HOUR_GLOBAL:-60}"
+      DAILY_COST_LIMIT_USD: "${AI_DAILY_COST_LIMIT_USD:-2}"
+      BUILD_COOLDOWN_SEC: "${AI_BUILD_COOLDOWN_SEC:-10}"
+      TZ: "${TZ:-Europe/London}"
+    volumes:
+      - ${MC_DATA:-/mnt/tank/apps/minecraft}/data:/data:ro
+      - ${MC_DATA:-/mnt/tank/apps/minecraft}/ai-builder:/state
+      # Write access to ONLY the BlueMap map configs, so a world created from
+      # the panel can be added to the web map. The rest of /data stays read-only.
+      - ${MC_DATA:-/mnt/tank/apps/minecraft}/data/plugins/BlueMap/maps:/bluemap-maps
+    depends_on:
+      mc:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
