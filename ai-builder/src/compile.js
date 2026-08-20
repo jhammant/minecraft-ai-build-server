@@ -20,6 +20,54 @@ export function spanVolume(s) {
   return (s.x2 - s.x1 + 1) * (s.y2 - s.y1 + 1) * (s.z2 - s.z1 + 1);
 }
 
+// Merge a blockstate into a material id: "oak_stairs" + "facing=north" ->
+// "oak_stairs[facing=north]". A state already present is left alone, so an
+// explicit state in the plan always wins over a generated one.
+function addState(material, kv) {
+  const key = kv.split('=')[0];
+  if (material.includes(`${key}=`)) return material;
+  const i = material.indexOf('[');
+  return i === -1 ? `${material}[${kv}]` : `${material.slice(0, -1)},${kv}]`;
+}
+
+// The "orient" modifier ("outward"/"inward") only means something for stair
+// and slab materials; everything else passes through untouched. Stairs on the
+// perimeter of the op's footprint are split into one-block-thick face spans
+// whose facing follows the outward (or inward) normal; slabs get a type
+// instead of a facing, since that is how a slab "faces".
+const OPPOSITE = { north: 'south', south: 'north', east: 'west', west: 'east' };
+
+function orientSpans(spans, orient) {
+  const base = (m) => m.split('[')[0];
+  const shaped = spans.filter((s) => /_(stairs|slab)$/.test(base(s.material)));
+  if (shaped.length === 0) return spans;
+  const b = spansBounds(shaped);
+  const out = [];
+  for (const s of spans) {
+    const sb = base(s.material);
+    if (sb.endsWith('_slab')) {
+      out.push({ ...s, material: addState(s.material, `type=${orient === 'outward' ? 'top' : 'bottom'}`) });
+      continue;
+    }
+    if (!sb.endsWith('_stairs')) { out.push(s); continue; }
+    // Carve perimeter faces out of the span (x faces first, then z, so corner
+    // blocks belong to the x face). Interior blocks keep the plain material.
+    let { x1, x2, z1, z2 } = s;
+    const face = (fx1, fz1, fx2, fz2, normal) => out.push({
+      ...s, x1: fx1, z1: fz1, x2: fx2, z2: fz2,
+      material: addState(s.material, `facing=${orient === 'outward' ? normal : OPPOSITE[normal]}`),
+    });
+    if (x1 === b.x1) { face(x1, z1, x1, z2, 'west'); x1 += 1; }
+    if (x2 === b.x2 && x2 >= x1) { face(x2, z1, x2, z2, 'east'); x2 -= 1; }
+    if (x1 <= x2) {
+      if (z1 === b.z1) { face(x1, z1, x2, z1, 'north'); z1 += 1; }
+      if (z2 === b.z2 && z2 >= z1) { face(x1, z2, x2, z2, 'south'); z2 -= 1; }
+    }
+    if (x1 <= x2 && z1 <= z2) out.push({ ...s, x1, z1, x2, z2 });
+  }
+  return out;
+}
+
 // Horizontal runs making up a filled or hollow disc of the given radius,
 // centred on (0,0). Returns [{dz, x1, x2}].
 // A hollow disc is disc(r) minus disc(r-1), which keeps the wall exactly one
@@ -161,18 +209,24 @@ function opToSpans(op) {
     }
 
     case 'roof': {
-      // A real pitched roof. Five primitives could only make a pyramid or a
-      // cone, so every rectangular building came out flat-topped.
-      const x1 = Math.min(op.x1, op.x2) - (op.overhang ?? 1);
-      const x2 = Math.max(op.x1, op.x2) + (op.overhang ?? 1);
-      const z1 = Math.min(op.z1, op.z2) - (op.overhang ?? 1);
-      const z2 = Math.max(op.z1, op.z2) + (op.overhang ?? 1);
+      // A real pitched roof is a SHELL. The first version emitted a full solid
+      // slab per layer, so a roof over a 40-wide hall became twenty stacked
+      // slabs - a giant stepped wedge that looked like a shard and ate the
+      // block budget. Emit only the sloping surface (thickness = pitch) plus
+      // the gable ends, unless solid is explicitly asked for.
+      const oh = op.overhang ?? 1;
+      const x1 = Math.min(op.x1, op.x2) - oh;
+      const x2 = Math.max(op.x1, op.x2) + oh;
+      const z1 = Math.min(op.z1, op.z2) - oh;
+      const z2 = Math.max(op.z1, op.z2) + oh;
       const pitch = Math.max(1, op.pitch ?? 1);
       const style = ['gable', 'hip', 'shed'].includes(op.style) ? op.style : 'gable';
       const ridge = op.ridge === 'x' ? 'x' : 'z';
+      const solid = op.solid === true;
       const halfDepth = ridge === 'z'
         ? Math.ceil((x2 - x1) / 2)
         : Math.ceil((z2 - z1) / 2);
+
       for (let k = 0; k * pitch <= halfDepth; k++) {
         const inset = k * pitch;
         let a1 = x1; let a2 = x2; let b1 = z1; let b2 = z2;
@@ -186,7 +240,100 @@ function opToSpans(op) {
           if (style === 'hip') { a1 = x1 + inset; a2 = x2 - inset; }
         }
         if (a1 > a2 || b1 > b2) break;
-        out.push(span(a1, op.y + k, b1, a2, op.y + k, b2, m));
+        const y = op.y + k;
+
+        if (solid) { out.push(span(a1, y, b1, a2, y, b2, m)); continue; }
+
+        // Shell: just the courses that form the slope, `pitch` thick.
+        const w = Math.max(1, pitch);
+        if (style === 'shed') {
+          if (ridge === 'z') out.push(span(a1, y, b1, Math.min(a1 + w - 1, a2), y, b2, m));
+          else out.push(span(a1, y, b1, a2, y, Math.min(b1 + w - 1, b2), m));
+        } else if (ridge === 'z') {
+          out.push(span(a1, y, b1, Math.min(a1 + w - 1, a2), y, b2, m));   // -x slope
+          out.push(span(Math.max(a2 - w + 1, a1), y, b1, a2, y, b2, m));   // +x slope
+          if (style === 'hip') {
+            out.push(span(a1, y, b1, a2, y, Math.min(b1 + w - 1, b2), m));
+            out.push(span(a1, y, Math.max(b2 - w + 1, b1), a2, y, b2, m));
+          }
+        } else {
+          out.push(span(a1, y, b1, a2, y, Math.min(b1 + w - 1, b2), m));
+          out.push(span(a1, y, Math.max(b2 - w + 1, b1), a2, y, b2, m));
+          if (style === 'hip') {
+            out.push(span(a1, y, b1, Math.min(a1 + w - 1, a2), y, b2, m));
+            out.push(span(Math.max(a2 - w + 1, a1), y, b1, a2, y, b2, m));
+          }
+        }
+        // Close the gable ends so the roof isn't open at the sides.
+        if (style === 'gable') {
+          if (ridge === 'z') {
+            out.push(span(a1, y, b1, a2, y, b1, m));
+            out.push(span(a1, y, b2, a2, y, b2, m));
+          } else {
+            out.push(span(a1, y, b1, a1, y, b2, m));
+            out.push(span(a2, y, b1, a2, y, b2, m));
+          }
+        }
+      }
+      break;
+    }
+
+    case 'stairs': {
+      // A climbable flight. The model cannot get stair blockstates right by
+      // hand, and "can I actually walk up it" is the property a child tests
+      // first - so the compiler owns it.
+      const DIRS = {
+        north: [0, -1], south: [0, 1], west: [-1, 0], east: [1, 0],
+      };
+      const [dx, dz] = DIRS[op.dir] || DIRS.north;
+      const steps = Math.max(1, op.steps);
+      const width = Math.max(1, op.width ?? 2);
+      // Perpendicular to travel, so the flight has width.
+      const [px, pz] = dx !== 0 ? [0, 1] : [1, 0];
+      for (let i = 0; i < steps; i++) {
+        const x = op.x + dx * i;
+        const z = op.z + dz * i;
+        const y = op.y + i;
+        const x2 = x + px * (width - 1);
+        const z2 = z + pz * (width - 1);
+        const tread = `${m}[facing=${op.dir || 'north'},half=bottom]`;
+        out.push(span(x, y, z, x2, y, z2, tread));
+        if (op.support !== false && y > op.y) {
+          out.push(span(x, op.y, z, x2, y - 1, z2, m));
+        }
+        // Headroom, so the flight is walkable rather than a buried ramp.
+        out.push(span(x, y + 1, z, x2, y + 3, z2, 'air'));
+      }
+      break;
+    }
+
+    case 'layer': {
+      // Draw a level as a character grid with a legend - the way people
+      // actually design Minecraft builds, and a form models are genuinely good
+      // at. Five abstract solids could never express a window pattern, a
+      // doorway with a lintel, or a ship's deck outline; this can draw anything
+      // exactly. Rows run along +z, characters along +x.
+      const legend = op.legend || {};
+      const rows = op.rows || [];
+      for (let r = 0; r < rows.length; r++) {
+        const row = String(rows[r]);
+        let runStart = null;
+        let runMat = null;
+        const flush = (endIdx) => {
+          if (runStart === null || runMat == null) return;
+          out.push(span(op.x + runStart, op.y, op.z + r,
+            op.x + endIdx, op.y, op.z + r, runMat));
+          runStart = null; runMat = null;
+        };
+        for (let i = 0; i < row.length; i++) {
+          const ch = row[i];
+          const mat = legend[ch];
+          // Unmapped characters (and a space) mean "leave whatever is there",
+          // which is what makes a grid safe to draw over existing work.
+          if (!mat) { flush(i - 1); continue; }
+          if (mat !== runMat) { flush(i - 1); runStart = i; runMat = mat; }
+        }
+        flush(row.length - 1);
       }
       break;
     }
@@ -240,7 +387,7 @@ function opToSpans(op) {
       throw new Error(`unknown op: ${op.op}`);
   }
 
-  return out;
+  return op.orient ? orientSpans(out, op.orient) : out;
 }
 
 export function planToSpans(plan) {

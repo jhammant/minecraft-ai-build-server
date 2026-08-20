@@ -5,9 +5,12 @@
 // lives here and each caller supplies an origin strategy and a way to report
 // progress.
 
+import fs from 'node:fs';
 import { generateBuildPlan } from './llm.js';
 import { validatePlan, ValidationError, WORLD_MIN_Y, WORLD_MAX_Y } from './validate.js';
 import { spansToCommands } from './compile.js';
+import { renderIso } from './render-iso.js';
+import { encodePNG } from './png.js';
 import { snapshot, restore, slotFor } from './undo.js';
 
 export { ValidationError };
@@ -55,6 +58,13 @@ export async function footprintSurfaceY(rcon, cx, cz, halfX, halfZ) {
   return best;
 }
 
+// Foliage the probe must see straight through. A binary search from the sky
+// stops at the first thing that isn't air, and in a forest that is the top of a
+// tree - which is exactly why builds ended up perched on the canopy.
+const FOLIAGE = ['#minecraft:leaves', '#minecraft:logs', '#minecraft:replaceable',
+  'bamboo', 'cactus', 'sugar_cane', 'vine', 'snow'];
+const MAX_CANOPY = 48;       // tallest jungle tree, with room to spare
+
 export async function findSurfaceY(rcon, x, z) {
   const isAir = async (y) => /Test passed/i.test(
     await rcon.send(`execute if block ${x} ${y} ${z} air`),
@@ -67,11 +77,80 @@ export async function findSurfaceY(rcon, x, z) {
     const mid = Math.floor((lo + hi) / 2);
     if (await isAir(mid)) hi = mid; else lo = mid;
   }
-  return lo + 1;             // first free block above the highest solid one
+
+  // `lo` is the highest non-air block. If it's part of a tree, keep walking
+  // down until real ground. Done by testing rather than by clearing, so the
+  // measurement never changes the world before the undo snapshot is taken.
+  let y = lo;
+  for (let step = 0; step < MAX_CANOPY; step++) {
+    let leafy = false;
+    for (const kind of FOLIAGE) {
+      if (/Test passed/i.test(await rcon.send(`execute if block ${x} ${y} ${z} ${kind}`))) {
+        leafy = true;
+        break;
+      }
+    }
+    if (!leafy) break;
+    y--;
+    // Air under a canopy is still canopy - keep going until something solid.
+    while (y > WORLD_MIN_Y && await isAir(y)) y--;
+  }
+  return y + 1;              // first free block above the ground
+}
+
+// Trees standing inside the footprint poke through walls and roofs. Clearing
+// them is part of "put this on the land", and it happens AFTER the snapshot so
+// undo puts the wood back.
+export async function clearFoliage(rcon, region) {
+  const { x1, x2, z1, z2 } = region;
+  const area = (x2 - x1 + 1) * (z2 - z1 + 1);
+  const slice = Math.max(1, Math.floor(30000 / Math.max(1, area)));
+  const top = Math.min(WORLD_MAX_Y, region.y2 + 24);
+  for (const kind of ['#minecraft:leaves', '#minecraft:logs', '#minecraft:replaceable']) {
+    for (let y = region.y1; y <= top; y += slice) {
+      const yTop = Math.min(y + slice - 1, top);
+      await rcon.send(`fill ${x1} ${y} ${z1} ${x2} ${yTop} ${z2} air replace ${kind}`)
+        .catch(() => {});
+    }
+  }
+}
+
+// The handful of blocks that dominate a build, for the details panel.
+function topMaterials(spans, n = 6) {
+  const vol = new Map();
+  for (const s of spans) {
+    const base = String(s.material).split('[')[0].replace(/^minecraft:/, '');
+    if (base === 'air') continue;
+    vol.set(base, (vol.get(base) || 0)
+      + (s.x2 - s.x1 + 1) * (s.y2 - s.y1 + 1) * (s.z2 - s.z1 + 1));
+  }
+  return [...vol.entries()].sort((a, b) => b[1] - a[1]).slice(0, n).map(([m]) => m);
+}
+
+// A row saying "211,845 blocks" doesn't tell you what got made. We already hold
+// every block's position and material, so draw it: no camera to fly, no chunk to
+// load, no chance of photographing the inside of a wall.
+function saveShot(dir, id, spans, log) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const img = renderIso(spans, { width: 640, height: 640 });
+    fs.writeFileSync(`${dir}/${id}.png`, encodePNG(img));
+    return `${id}.png`;
+  } catch (err) {
+    // A missing picture must never fail a build that actually worked.
+    log(`could not render preview: ${err.message}`);
+    return null;
+  }
 }
 
 export function createBuilder({ env, limits, state, saveState, log }) {
   let busy = false;
+  // A single "Thinking..." then silence for four minutes reads as a hang. Track
+  // what the build is actually doing so the panel can show it.
+  let progress = null;
+  const setProgress = (phase, detail, done, total) => {
+    progress = { phase, detail, done, total, at: Date.now() };
+  };
   const maxPerHour = Number(env.MAX_BUILDS_PER_HOUR || 20);
   const cooldownMs = Number(env.BUILD_COOLDOWN_SEC || 10) * 1000;
   // Per-player limits alone don't bound the bill: ten players at 20/hour is
@@ -162,11 +241,14 @@ export function createBuilder({ env, limits, state, saveState, log }) {
         placement = { mode: 'ahead', pos, yaw };
       }
 
+      setProgress('thinking', `Designing "${description}"`, 0, 0);
       notify(`Thinking about "${description}"...`, 'info');
 
       const verify = (plan) => validatePlan(plan, { x: 0, y: originY, z: 0 }, limits);
+      const onAttempt = (n, of) => setProgress('thinking',
+        n === 1 ? `Designing "${description}"` : `Retry ${n} of ${of} — the first plan didn't pass the safety check`, 0, 0);
       const { plan, verified, usage, attempts, model } = await generateBuildPlan(
-        description, env, verify,
+        description, env, verify, { onAttempt },
       );
 
       let origin;
@@ -203,6 +285,7 @@ export function createBuilder({ env, limits, state, saveState, log }) {
       log(`build "${plan.name}" for ${player} at ${origin.x},${origin.y},${origin.z}: `
         + `${verified.blocks} blocks, ${commands.length} commands, ${attempts} attempt(s), ${model}`);
 
+      setProgress('placing', `Building "${plan.name}"`, 0, commands.length);
       notify(`Building "${plan.name}" - ${verified.blocks} blocks...`, 'progress');
 
       const pad = limits.maxExtent;
@@ -219,6 +302,7 @@ export function createBuilder({ env, limits, state, saveState, log }) {
       // when the server is busy (a pre-generation pass, or a big render), and
       // a build with no snapshot can never be undone - so it's worth a retry
       // and a loud log rather than a silent downgrade.
+      setProgress('snapshot', 'Saving the area so this can be undone', 0, 0);
       let snap = null;
       for (let attempt = 1; attempt <= 2 && !snap; attempt++) {
         try {
@@ -230,13 +314,20 @@ export function createBuilder({ env, limits, state, saveState, log }) {
       }
       if (!snap) log(`WARNING: building "${description}" with NO UNDO available`);
 
+      // Now the area is safely recorded, take the trees out of it.
+      setProgress('clearing', 'Clearing trees off the site', 0, 0);
+      await clearFoliage(rcon, region);
+
       let done = 0;
       for (const cmd of commands) {
         const res = await rcon.send(cmd);
         if (/^(Failed|Unknown|Incorrect|That position)/i.test(res.trim())) {
           log(`command rejected: ${cmd} -> ${res.trim().slice(0, 120)}`);
         }
-        if (++done % 40 === 0) await new Promise((r) => setTimeout(r, 60));
+        if (++done % 40 === 0) {
+          setProgress('placing', `Building "${plan.name}"`, done, commands.length);
+          await new Promise((r) => setTimeout(r, 60));
+        }
       }
 
       await rcon.send(
@@ -254,9 +345,15 @@ export function createBuilder({ env, limits, state, saveState, log }) {
         || ((usage?.prompt_tokens || 0) * 0.58 + (usage?.completion_tokens || 0) * 2.44) / 1e6;
       recordSpend(cost);
 
+      // One timestamp identifies the build everywhere: history key and picture.
+      // (`at` is already the caller's placement argument, hence the name.)
+      const builtAt = Date.now();
       state.history = [
         { player, name: plan.name, summary: plan.summary, description,
-          origin, blocks: verified.blocks, seconds, at: Date.now(),
+          origin, blocks: verified.blocks, seconds, at: builtAt,
+          ops: plan.ops.length, commands: commands.length, model,
+          shot: saveShot(`${env.STATE_DIR || '/state'}/shots`, builtAt, verified.spans, log),
+          size: verified.size, cost, materials: topMaterials(verified.spans),
           // Kept so a build can be located (and cleared) even if its undo
           // snapshot failed.
           region, undoable: Boolean(snap) },
@@ -272,6 +369,7 @@ export function createBuilder({ env, limits, state, saveState, log }) {
       };
     } finally {
       busy = false;
+      progress = null;
     }
   }
 
@@ -286,5 +384,5 @@ export function createBuilder({ env, limits, state, saveState, log }) {
     return { name };
   }
 
-  return { run, undo, isBusy: () => busy, rateLimit, spentToday, dailyCostLimit };
+  return { run, undo, isBusy: () => busy, progress: () => progress, rateLimit, spentToday, dailyCostLimit };
 }
