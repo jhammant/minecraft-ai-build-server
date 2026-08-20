@@ -62,6 +62,8 @@ services:
       # BlueMap    : 3D web map, served through the panel at /map
       # Chunky     : pre-generates terrain so there is a world to look at -
       #              Minecraft only creates land as players walk into it
+      # WorldEdit  : the human counterpart to the AI builder - select a region
+      #              and reshape it by hand after the AI puts something down
       MODRINTH_PROJECTS: |
         multiverse-core
         luckperms
@@ -69,6 +71,7 @@ services:
         viaversion
         bluemap
         chunky
+        worldedit
       MODRINTH_DOWNLOAD_DEPENDENCIES: "required"
 
       # Geyser/Floodgate come straight from GeyserMC rather than Modrinth.
