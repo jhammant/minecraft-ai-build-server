@@ -155,3 +155,60 @@ button.secondary { background: var(--panel-2); color: var(--text); border-color:
 .row input { flex: 1 1 12rem; }
 
 code { background: var(--panel-2); padding: .1rem .35rem; border-radius: 5px; font-size: .85em; }
+
+/* ---------- history rows: a summary you can open ---------- */
+.history li.row { padding: 0; display: block; border-bottom: 1px solid var(--line); }
+.history li.row:last-child { border-bottom: 0; }
+.history .head {
+  display: flex; align-items: baseline; gap: 10px; width: 100%;
+  background: none; border: 0; color: inherit; font: inherit; text-align: left;
+  padding: 10px 4px 10px 22px; cursor: pointer; position: relative;
+}
+.history .head:hover { background: var(--hover, rgba(255,255,255,.04)); }
+.history .head::before {
+  content: '▸'; position: absolute; left: 6px; color: var(--muted);
+  transition: transform .15s ease;
+}
+.history li.open .head::before { transform: rotate(90deg); }
+.history .head .when { margin-left: auto; white-space: nowrap; color: var(--muted); font-size: .85em; }
+.history .detail { display: none; padding: 2px 4px 16px 22px; }
+.history li.open .detail { display: block; }
+.history .detail .summary { margin: 0 0 6px; }
+.history .detail .asked { margin: 0 0 10px; color: var(--muted); font-style: italic; }
+.history .facts {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 4px 18px; font-size: .9em;
+}
+.history .facts div { display: flex; justify-content: space-between; gap: 10px;
+  border-bottom: 1px dotted var(--line); padding: 3px 0; }
+.history .facts span:first-child { color: var(--muted); }
+.history .mats { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+.history .mat {
+  font-size: .78em; padding: 3px 9px; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--muted);
+}
+.history .link {
+  margin-top: 12px; background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--accent); font: inherit; text-decoration: underline;
+}
+
+/* ---------- build progress ---------- */
+.bar { height: 6px; border-radius: 3px; background: var(--line); margin-top: 10px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); border-radius: 3px;
+  transition: width .4s ease; }
+.bar.indeterminate > i { width: 34%; animation: slide 1.3s ease-in-out infinite; }
+@keyframes slide { 0% { margin-left: -34%; } 100% { margin-left: 100%; } }
+.history .shot {
+  display: block; width: 100%; max-width: 340px; aspect-ratio: 1;
+  object-fit: contain; margin: 0 0 12px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+}
+
+.world-ctl { margin-top: .4rem; }
+.history .detail-actions { margin-top: 12px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.history .detail-actions .link { margin-top: 0; }
+.history .tp-msg { font-size: .85em; }
+#worlds select.mode {
+  margin-left: .6rem; background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 7px; padding: .15rem .4rem; font-size: .8rem;
+}

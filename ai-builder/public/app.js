@@ -173,7 +173,8 @@ $('#build-form').addEventListener('submit', async (e) => {
   }
 
   go.disabled = true;
-  say('Thinking… this usually takes about 30 seconds.', '');
+  say('Thinking… working out what to build.', '');
+  const stop = trackProgress();
   try {
     const r = await api('/api/build', { description, player, ...at });
     say(`<b>${r.name}</b> — ${r.summary || ''}<br>`
@@ -185,9 +186,39 @@ $('#build-form').addEventListener('submit', async (e) => {
   } catch (ex) {
     say(ex.message, 'bad');
   } finally {
+    stop();
     go.disabled = false;
   }
 });
+
+// A build can take four minutes. One "Thinking…" and then silence for that long
+// reads as a hang - so ask the server what it is doing and show it.
+const PHASES = {
+  thinking: 'Designing the build',
+  snapshot: 'Saving the area so you can undo',
+  clearing: 'Clearing trees off the site',
+  placing: 'Placing blocks',
+};
+function trackProgress() {
+  const t0 = Date.now();
+  const tick = async () => {
+    let p = null;
+    try { p = (await api('/api/status')).progress; } catch { /* keep the last message */ }
+    const secs = Math.round((Date.now() - t0) / 1000);
+    if (!p) return say(`Working… ${secs}s`, '');
+    const label = `${PHASES[p.phase] || p.phase}${p.detail ? ` — ${esc(p.detail)}` : ''}`;
+    const pct = p.total ? Math.round((p.done / p.total) * 100) : null;
+    say(`${label}<br><span class="muted">${secs}s`
+      + (pct === null ? '' : ` · ${p.done.toLocaleString()} of ${p.total.toLocaleString()} fills`)
+      + '</span>'
+      + (pct === null
+        ? '<div class="bar indeterminate"><i></i></div>'
+        : `<div class="bar"><i style="width:${pct}%"></i></div>`), '');
+  };
+  tick();
+  const id = setInterval(tick, 1500);
+  return () => clearInterval(id);
+}
 
 // Prepare a site: natural terrain is rarely flat, and a castle dropped on a
 // hillside half-buries itself.
@@ -231,35 +262,165 @@ const ago = (ts) => {
   return `${Math.floor(s / 86400)}d ago`;
 };
 
+// A name and a block count tell you something got built, but not WHAT. Each row
+// opens to show what was actually asked for and what came back.
+function detailHtml(b) {
+  const row = (k, v) => (v ? `<div><span>${k}</span><span>${v}</span></div>` : '');
+  const s = b.size ? `${b.size.x}×${b.size.y}×${b.size.z}` : '';
+  return `<div class="detail">
+    ${b.shot ? `<img class="shot" data-src="/shots/${esc(b.shot)}" alt="${esc(b.name)}">` : ''}
+    ${b.summary ? `<p class="summary">${esc(b.summary)}</p>` : ''}
+    ${b.description ? `<p class="asked">“${esc(b.description)}”</p>` : ''}
+    <div class="facts">
+      ${row('Blocks', b.blocks.toLocaleString())}
+      ${row('Size', s)}
+      ${row('Shapes', b.ops ? `${b.ops} ops → ${(b.commands || 0).toLocaleString()} fills` : '')}
+      ${row('Took', b.seconds ? `${b.seconds}s` : '')}
+      ${row('Cost', b.cost ? `${(b.cost * 100).toFixed(1)}p` : '')}
+      ${row('Where', b.origin ? `${b.origin.x}, ${b.origin.y}, ${b.origin.z}` : '')}
+      ${row('Built by', esc(b.player || ''))}
+      ${row('Model', esc(b.model || ''))}
+    </div>
+    ${(b.materials || []).length
+      ? `<div class="mats">${b.materials.map((m) => `<span class="mat">${esc(m.replace(/_/g, ' '))}</span>`).join('')}</div>`
+      : ''}
+    ${b.origin ? `<div class="detail-actions">
+      <button class="link go-there" data-x="${b.origin.x}" data-y="${b.origin.y}" data-z="${b.origin.z}">Show me on the map</button>
+      <button class="link tp-there" data-x="${b.origin.x}" data-y="${b.origin.y}" data-z="${b.origin.z}">Teleport me there</button>
+    </div>` : ''}
+  </div>`;
+}
+
 async function refreshHistory() {
   const ul = $('#history');
   try {
     const { builds } = await api('/api/history');
+    // Keep whatever the user had open across a refresh.
+    const open = new Set([...ul.querySelectorAll('li.open')].map((li) => li.dataset.at));
     ul.innerHTML = builds.length
-      ? builds.map((b) => `<li><b>${esc(b.name)}</b>
-          <span class="muted">${esc(b.player)} · ${b.blocks.toLocaleString()} blocks</span>
-          <span class="when">${ago(b.at)}</span></li>`).join('')
+      ? builds.map((b) => `<li class="row${open.has(String(b.at)) ? ' open' : ''}" data-at="${b.at}">
+          <button class="head" type="button">
+            <b>${esc(b.name)}</b>
+            <span class="muted">${esc(b.player)} · ${b.blocks.toLocaleString()} blocks</span>
+            <span class="when">${ago(b.at)}</span>
+          </button>
+          ${detailHtml(b)}
+        </li>`).join('')
       : '<li class="muted">nothing yet</li>';
   } catch { ul.innerHTML = '<li class="muted">could not load</li>'; }
 }
 
+$('#history').addEventListener('click', (e) => {
+  const jump = e.target.closest('.go-there');
+  if (jump) {
+    const { x, y, z } = jump.dataset;
+    // Actually fly the map there. Filling in the coordinate boxes was not
+    // "showing me on the map" - nothing visibly moved, so the button looked
+    // broken. BlueMap reads its camera straight out of the URL hash.
+    const map = $('#map-pick').value || 'world';
+    const frame = $('#map');
+    try {
+      frame.contentWindow.location.hash =
+        `#${map}:${x}:${y || 100}:${z}:220:0:0.55:0:0:perspective`;
+    } catch {
+      frame.src = `/map/#${map}:${x}:${y || 100}:${z}:220:0:0.55:0:0:perspective`;
+    }
+    // Point the next build at the same spot, so "show me" and "build here" agree.
+    $('input[name=where][value=coords]').checked = true;
+    $('#cx').value = x; $('#cz').value = z;
+    // Scroll the CARD, not the iframe: scrollIntoView on an iframe scrolls the
+    // document inside it, which moves nothing the user can see.
+    // Plain scrollIntoView, not smooth: smooth is a no-op under some browser
+    // settings, and a button that silently does nothing is the bug being fixed.
+    (frame.closest('.card') || frame).scrollIntoView({ block: 'start' });
+    return;
+  }
+  const tp = e.target.closest('.tp-there');
+  if (tp) {
+    const name = ($('#who').value || localStorage.getItem('mc-player') || '').trim();
+    const note = tp.parentElement;
+    const say2 = (msg) => {
+      let n = note.querySelector('.tp-msg');
+      if (!n) { n = document.createElement('span'); n.className = 'tp-msg muted'; note.appendChild(n); }
+      n.textContent = msg;
+    };
+    if (!name) return say2('Put your Minecraft name in "Build as" first.');
+    say2('Sending you…');
+    api('/api/teleport', { name, x: tp.dataset.x, y: tp.dataset.y, z: tp.dataset.z })
+      .then((r) => say2(r.message))
+      .catch((ex) => say2(ex.message));
+    return;
+  }
+
+  const head = e.target.closest('.head');
+  if (!head) return;
+  const li = head.closest('li');
+  li.classList.toggle('open');
+  // Fetch the picture when the row opens. `loading="lazy"` never fires for an
+  // image inside a display:none block, so the src is withheld until it is
+  // actually on screen - which also saves 40 requests for rows nobody opens.
+  const img = li.querySelector('img.shot[data-src]');
+  if (li.classList.contains('open') && img) {
+    img.src = img.dataset.src;
+    img.removeAttribute('data-src');
+  }
+});
+
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+// Small world controls. These are the buttons a child reaches for before they
+// ever type a prompt, so they live next to the build form rather than buried.
+document.querySelector('.world-ctl').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-time], button[data-weather]');
+  if (!btn) return;
+  const was = btn.textContent;
+  btn.disabled = true;
+  try {
+    const r = btn.dataset.time
+      ? await api('/api/time', { value: btn.dataset.time })
+      : await api('/api/weather', { value: btn.dataset.weather });
+    say(r.message, 'ok');
+  } catch (ex) {
+    say(ex.message, 'bad');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = was;
+  }
+});
+
 // ---------- players ----------
 
+// Silence is the worst possible response to pressing a button: a success used
+// to show nothing at all, and an empty field only triggered a browser tooltip -
+// both of which read as "it didn't work".
 $('#wl-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const err = $('#wl-err');
+  const btn = $('#wl-form').querySelector('button[type=submit]');
+  const name = $('#wl-name').value.trim();
+  const say = (msg, bad) => {
+    err.textContent = msg;
+    err.hidden = false;
+    err.style.color = bad ? 'var(--danger)' : 'var(--accent)';
+  };
   err.hidden = true;
+  if (!name) return say('Type their Minecraft username first.', true);
+
+  btn.disabled = true;
+  const was = btn.textContent;
+  btn.textContent = 'Adding…';
   try {
-    await api('/api/whitelist', {
-      name: $('#wl-name').value.trim(),
-      bedrock: $('#wl-bedrock').checked,
-    });
+    const r = await api('/api/whitelist', { name, bedrock: $('#wl-bedrock').checked });
     $('#wl-name').value = '';
+    say(r.message || `${name} can now join.`, false);
     refreshWhitelist();
-  } catch (ex) { err.textContent = ex.message; err.hidden = false; }
+  } catch (ex) {
+    say(ex.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = was;
+  }
 });
 
 async function refreshWhitelist() {
@@ -287,12 +448,31 @@ $('#world-form').addEventListener('submit', async (e) => {
   } catch (ex) { alert(ex.message); }
 });
 
+$('#worlds').addEventListener('change', async (e) => {
+  const sel = e.target.closest('select.mode');
+  if (!sel || !sel.value) return;
+  const { world } = sel.dataset;
+  sel.disabled = true;
+  try {
+    const r = await api('/api/worlds/mode', { name: world, mode: sel.value });
+    alert(r.message);
+  } catch (ex) { alert(ex.message); } finally { sel.disabled = false; sel.value = ''; }
+});
+
 async function refreshWorlds() {
   const ul = $('#worlds');
   try {
     const { worlds } = await api('/api/worlds');
     ul.innerHTML = worlds.length
-      ? worlds.map((w) => `<li>${esc(w.name)}<span class="type">${esc(w.type)}</span></li>`).join('')
+      ? worlds.map((w) => `<li>${esc(w.name)}
+          <span class="type">${esc(w.type)}</span>
+          <select class="mode" data-world="${esc(w.name)}" title="Game mode for this world">
+            <option value="">mode…</option>
+            <option value="survival">survival</option>
+            <option value="creative">creative</option>
+            <option value="adventure">adventure</option>
+            <option value="spectator">spectator</option>
+          </select></li>`).join('')
       : '<li class="muted">none found</li>';
   } catch { ul.innerHTML = '<li class="muted">could not load</li>'; }
 }

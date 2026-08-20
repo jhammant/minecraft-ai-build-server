@@ -319,6 +319,7 @@ export function startWebServer({ env, state, saveState, builder, log, getRcon, b
           max: m ? Number(m[2]) : 0,
           players: names,
           busy: builder.isBusy(),
+          progress: builder.progress ? builder.progress() : null,
           mapUrl: env.MAP_PUBLIC_URL || '',
         });
       }
@@ -352,6 +353,65 @@ export function startWebServer({ env, state, saveState, builder, log, getRcon, b
         if (!NAME_RE.test(String(name || ''))) return json(res, 400, { error: 'Bad name' });
         const out = strip(await rcon().send(`whitelist remove ${name}`));
         return json(res, 200, { ok: true, message: out });
+      }
+
+      // Take me to a build. Seeing a castle on the map and then having to walk
+      // to it is the gap this closes. The player name and the coordinates are
+      // both validated - they end up inside a server command.
+      case 'POST /api/teleport': {
+        const { name, x, y, z } = await readBody(req);
+        if (!NAME_RE.test(String(name || ''))) {
+          return json(res, 400, { error: 'Type your Minecraft name first.' });
+        }
+        const n = [x, y, z].map(Number);
+        if (!n.every(Number.isFinite)) return json(res, 400, { error: 'Bad coordinates' });
+        const [tx, ty, tz] = n.map(Math.round);
+        // Arrive on top of the build rather than inside a wall.
+        const out = strip(await rcon().send(`tp ${name} ${tx} ${ty + 2} ${tz}`));
+        // The server says "No entity was found", not "No player" - matching the
+        // wrong string reported a successful teleport to nobody.
+        if (/No entity was found|No player was found|Unknown/i.test(out)) {
+          return json(res, 409, { error: `${name} isn't online - join the server first.` });
+        }
+        return json(res, 200, { ok: true, message: `Sent ${name} to ${tx}, ${tz}.` });
+      }
+
+      // Time and weather: one command each, and the first thing a kid asks for.
+      case 'POST /api/time': {
+        const { value } = await readBody(req);
+        if (!['day', 'noon', 'night', 'midnight'].includes(value)) {
+          return json(res, 400, { error: 'Bad time' });
+        }
+        await rcon().send(`time set ${value}`);
+        return json(res, 200, { ok: true, message: `It's ${value} now.` });
+      }
+
+      case 'POST /api/weather': {
+        const { value } = await readBody(req);
+        if (!['clear', 'rain', 'thunder'].includes(value)) {
+          return json(res, 400, { error: 'Bad weather' });
+        }
+        await rcon().send(`weather ${value}`);
+        return json(res, 200, {
+          ok: true,
+          message: value === 'clear' ? 'Skies cleared.' : `Set the weather to ${value}.`,
+        });
+      }
+
+      // Multiverse holds a game mode per world, which is what makes a separate
+      // creative world worth having: build with the AI over there, keep the
+      // survival world intact over here.
+      case 'POST /api/worlds/mode': {
+        const { name, mode } = await readBody(req);
+        if (!WORLD_RE.test(String(name || ''))) return json(res, 400, { error: 'Bad world name' });
+        if (!['survival', 'creative', 'adventure', 'spectator'].includes(mode)) {
+          return json(res, 400, { error: 'Bad mode' });
+        }
+        // Multiverse 5 takes the world FIRST and calls the property
+        // "gamemode"; the older `mv modify set mode <mode> <world>` form fails
+        // with "Node not found in config: mode".
+        const out = strip(await rcon().send(`mv modify ${name} set gamemode ${mode}`));
+        return json(res, 200, { ok: true, message: out || `${name} is now ${mode}.` });
       }
 
       case 'GET /api/worlds': {
@@ -463,6 +523,23 @@ export function startWebServer({ env, state, saveState, builder, log, getRcon, b
       // would work for *viewing*, but the browser then refuses to let us read
       // the iframe's position - and reading that is how "build where I'm
       // looking" knows where to build.
+      // Build previews, drawn from the block data at build time. The filename
+      // is validated rather than joined blindly: it comes from our own state
+      // file, but that is not a reason to hand the path straight to readFile.
+      if (url.pathname.startsWith('/shots/')) {
+        if (!authed(req)) { res.writeHead(401); return res.end('Not logged in'); }
+        const name = url.pathname.slice('/shots/'.length);
+        if (!/^[0-9]+\.png$/.test(name)) { res.writeHead(404); return res.end('Not found'); }
+        const dir = path.resolve(env.STATE_DIR || '/state', 'shots');
+        const data = await fs.promises.readFile(path.join(dir, name)).catch(() => null);
+        if (!data) { res.writeHead(404); return res.end('Not found'); }
+        res.writeHead(200, {
+          'content-type': 'image/png',
+          'cache-control': 'public, max-age=31536000, immutable',
+        });
+        return res.end(data);
+      }
+
       if (url.pathname === '/map' || url.pathname.startsWith('/map/')) {
         if (!authed(req)) { res.writeHead(401); return res.end('Not logged in'); }
         const target = (env.MAP_INTERNAL_URL || 'http://mc:8100').replace(/\/$/, '');
