@@ -101,15 +101,20 @@ players.
 ## Quick start
 
 ```bash
-git clone https://github.com/<you>/minecraft-ai-build-server
+git clone https://github.com/jhammant/minecraft-ai-build-server
 cd minecraft-ai-build-server
 cp .env.example .env
-# set: RCON_PASSWORD, OPENROUTER_API_KEY, MC_OPS   (openssl rand -base64 24)
+# set: RCON_PASSWORD (openssl rand -base64 24)
+#      OPENROUTER_API_KEY
+#      MC_OPS  - your Minecraft username
 docker compose up -d
 ```
 
 - **Game:** `<your-host>` (Java) or `<your-host>:19132` (Bedrock)
 - **Panel:** `http://<your-host>:8080` — no password on your own LAN
+
+Needs Docker and about **5 GB of RAM** for the Minecraft container. Any
+always-on box will do — an old laptop, a Mini PC, a NAS.
 
 ## Letting your kid run it
 
