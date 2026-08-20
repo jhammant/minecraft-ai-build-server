@@ -116,6 +116,74 @@ docker compose up -d
 Needs Docker and about **5 GB of RAM** for the Minecraft container. Any
 always-on box will do — an old laptop, a Mini PC, a NAS.
 
+## Making them earn it
+
+> *"…would likely have made it a rewards system: 'build this much to earn the
+> right to make me a …'. Motivates them to do, controls how much they snap their
+> finger for a quick rush."*
+> — L. Mihalkovic, on a post about this server
+
+A kid who can summon a castle by typing one line never has to learn patience.
+So there is an optional mode where the right to summon one is earned by
+building by hand.
+
+It is **off by default** — `REWARDS_MODE=off`, and everything above behaves
+exactly as described. Switch it on with two lines in `.env`:
+
+```bash
+REWARDS_MODE=both      # off | credits | ranks | both
+REWARDS_EARN=placed    # placed | mixed | granted
+```
+
+Two levers, and you can run either or both:
+
+| | |
+|---|---|
+| **Credits** | Control how *often*. A build costs credits; credits are earned by playing. |
+| **Ranks** | Control how *big*. Apprentice → Builder → Architect → Master, each widening the size of build the validator will accept. |
+
+Builds are priced *after* the plan exists, so the cost matches what was actually
+asked for rather than what the model claimed:
+
+```text
+!build a castle
+> "Ironhold Keep" is a large build and costs 900 credits - you have 340.
+> Ask for something smaller, or go and build a bit more!
+```
+
+A live bar across the top of the screen shows how close they are, so the goal is
+never invisible. `!credits` prints the detail; the panel's **Builders** card
+shows every kid's balance, rank and where it came from.
+
+### Where the effort is measured
+
+From the statistics the server already writes — `world/players/stats/<uuid>.json`
+— which the AI builder container can already read. No plugin, no extra process.
+`REWARDS_EARN` chooses what counts:
+
+- **`placed`** — only blocks placed by hand, one credit each. The strictest
+  reading of *learning to DO*.
+- **`mixed`** — placing, mining, crafting and exploring, at different weights.
+- **`granted`** — nothing is earned in game at all. You hand out credits from
+  the panel, for the effort the server can't see: chores, homework, reading.
+
+Time spent online is worth **nothing** in every mode. Sitting in a chair is not
+effort, and paying for it teaches the wrong lesson.
+
+### The ways this could be gamed, and what stops them
+
+| Loophole | What stops it |
+|---|---|
+| Blocks are free in creative mode | Placements only pay while the player is in survival, and the baseline moves on regardless — so switching back doesn't release a banked afternoon |
+| Place and break the same dirt block all day | `REWARDS_MAX_POINTS_PER_HOUR` caps the rate at roughly what genuine building looks like |
+| A year of past play, banked the moment this is switched on | The first sweep only takes a baseline — earning starts from now |
+| Throwing 500 snowballs counts as building | Spammable items (projectiles, buckets, bone meal, spawn eggs) are excluded |
+| Build anonymously from the web panel | With rewards on, the panel requires a name before it will build |
+
+Rank can only ever *narrow* the `AI_MAX_*` safety envelope, never widen it — so
+promoting someone to Master can't outrun the server's own limits. Put your own
+account in `REWARDS_EXEMPT` to keep building for free.
+
 ## Letting your kid run it
 
 They go in a LuckPerms group with exactly `minecraft.command.whitelist` plus the
@@ -142,7 +210,7 @@ exposing the server safely.
 ## Tests
 
 ```bash
-cd ai-builder && npm test    # 49 unit: geometry, validator, network trust
+cd ai-builder && npm test    # 78 unit: geometry, validator, network trust, rewards
 ./scripts/mc test            # 13 end-to-end against a live server
 ```
 
@@ -150,6 +218,9 @@ The unit tests cover the security cases directly: command injection through
 block names, banned blocks hiding behind a `minecraft:` prefix, size limits
 enforced against real compiled geometry rather than what a plan claims about
 itself, and a public client spoofing `X-Forwarded-For` to look local.
+
+The rewards tests run the earning sweep against real stats files on disk, so
+the loopholes in the table above are checked rather than asserted.
 
 ## Notes from building this
 

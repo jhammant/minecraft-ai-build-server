@@ -167,6 +167,33 @@ services:
       MAX_BUILDS_PER_HOUR_GLOBAL: "${AI_MAX_BUILDS_PER_HOUR_GLOBAL:-60}"
       DAILY_COST_LIMIT_USD: "${AI_DAILY_COST_LIMIT_USD:-2}"
       BUILD_COOLDOWN_SEC: "${AI_BUILD_COOLDOWN_SEC:-10}"
+
+      # --- "Earn it" mode (off by default) ---------------------------------
+      # Makes the AI a reward rather than a tap: the right to summon a build is
+      # earned by building by hand. See README > Making them earn it.
+      #   off     - the AI is free and always available (default)
+      #   credits - a build costs credits, earned by playing
+      #   ranks   - the more you have built, the bigger a build I will make
+      #   both    - credits meter how often, rank meters how big
+      REWARDS_MODE: "${REWARDS_MODE:-off}"
+      # placed | mixed | granted - see .env.example
+      REWARDS_EARN: "${REWARDS_EARN:-placed}"
+      REWARDS_START_CREDITS: "${REWARDS_START_CREDITS:-150}"
+      REWARDS_PRICE_SMALL: "${REWARDS_PRICE_SMALL:-150}"
+      REWARDS_PRICE_MEDIUM: "${REWARDS_PRICE_MEDIUM:-400}"
+      REWARDS_PRICE_LARGE: "${REWARDS_PRICE_LARGE:-900}"
+      REWARDS_BAND_SMALL: "${REWARDS_BAND_SMALL:-3000}"
+      REWARDS_BAND_MEDIUM: "${REWARDS_BAND_MEDIUM:-30000}"
+      REWARDS_RANK_POINTS: "${REWARDS_RANK_POINTS:-0,2000,10000,40000}"
+      REWARDS_MAX_POINTS_PER_HOUR: "${REWARDS_MAX_POINTS_PER_HOUR:-1200}"
+      REWARDS_SURVIVAL_ONLY: "${REWARDS_SURVIVAL_ONLY:-true}"
+      REWARDS_BOSSBAR: "${REWARDS_BOSSBAR:-true}"
+      REWARDS_POLL_SEC: "${REWARDS_POLL_SEC:-30}"
+      # Names that build for free regardless - put YOUR account here.
+      REWARDS_EXEMPT: "${REWARDS_EXEMPT:-}"
+      # Where the effort is measured from: the server's own statistics files.
+      MC_WORLD_DIR: "/data/world"
+
       TZ: "${TZ:-Europe/London}"
     volumes:
       - ${MC_DATA:-/mnt/tank/apps/minecraft}/data:/data:ro

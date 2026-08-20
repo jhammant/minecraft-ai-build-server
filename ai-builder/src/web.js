@@ -214,7 +214,7 @@ function proxy(targetUrl, req, res) {
   req.pipe(upstream);
 }
 
-export function startWebServer({ env, state, saveState, builder, log, getRcon, broadcast }) {
+export function startWebServer({ env, state, saveState, builder, rewards, log, getRcon, broadcast }) {
   const port = Number(env.WEB_PORT || 8080);
   const password = env.WEB_PASSWORD || '';
   // When the panel sits behind a reverse proxy that already authenticated the
@@ -477,9 +477,46 @@ export function startWebServer({ env, state, saveState, builder, log, getRcon, b
       case 'GET /api/history':
         return json(res, 200, { builds: (state.history || []).slice(0, 40) });
 
+      // The ledger. Returns mode 'off' when rewards are switched off, which is
+      // how the panel knows not to draw the card at all.
+      case 'GET /api/rewards': {
+        if (!rewards?.enabled()) return json(res, 200, { mode: 'off', players: [] });
+        const cfg = rewards.config();
+        return json(res, 200, {
+          mode: cfg.mode,
+          earn: cfg.earn,
+          useCredits: cfg.useCredits,
+          useRanks: cfg.useRanks,
+          prices: { small: cfg.priceSmall, medium: cfg.priceMedium, large: cfg.priceLarge },
+          players: rewards.all(),
+        });
+      }
+
+      // The grown-up's override. Chores, homework and reading are effort too,
+      // and the server has no way of seeing any of it.
+      case 'POST /api/rewards/grant': {
+        if (!rewards?.enabled()) return json(res, 400, { error: 'Rewards are switched off.' });
+        const { name, credits } = await readBody(req);
+        if (!NAME_RE.test(String(name || ''))) return json(res, 400, { error: 'Bad name' });
+        try {
+          const s = rewards.grant(name, credits);
+          return json(res, 200, { ok: true, ...s });
+        } catch (err) {
+          return json(res, 400, { error: err.message });
+        }
+      }
+
       case 'POST /api/build': {
         const { description, x, y, z, player } = await readBody(req);
-        const who = NAME_RE.test(String(player || '')) ? player : 'WebPanel';
+        const named = NAME_RE.test(String(player || ''));
+        // With rewards on, an anonymous build would be a free one - so the
+        // panel has to say whose credits are being spent.
+        if (!named && rewards?.enabled()) {
+          return json(res, 400, {
+            error: 'Put your Minecraft name in "Build as" so I know whose credits to use.',
+          });
+        }
+        const who = named ? player : 'WebPanel';
         try {
           const result = await builder.run({
             rcon: rcon(),

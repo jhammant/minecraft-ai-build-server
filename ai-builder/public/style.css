@@ -212,3 +212,22 @@ code { background: var(--panel-2); padding: .1rem .35rem; border-radius: 5px; fo
   margin-left: .6rem; background: var(--panel-2); color: var(--text);
   border: 1px solid var(--line); border-radius: 7px; padding: .15rem .4rem; font-size: .8rem;
 }
+
+/* ---------- builders (earn-it mode) ---------- */
+.rewards { margin-top: 1rem; }
+#rewards-list { list-style: none; margin: 0; padding: 0; display: grid; gap: .5rem; }
+#rewards-list li.builder {
+  display: grid; gap: .3rem;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 9px; padding: .6rem .7rem;
+}
+#rewards-list .who { display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; }
+#rewards-list .rank {
+  font-size: .72rem; letter-spacing: .04em; text-transform: uppercase;
+  padding: .1rem .5rem; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--muted);
+}
+#rewards-list .wallet { font-size: .87rem; color: var(--accent); font-weight: 600; }
+#rewards-list .from { font-size: .78rem; }
+#rewards-list .bar { margin-top: .1rem; }
+#grant-credits { flex: 0 0 6.5rem; }

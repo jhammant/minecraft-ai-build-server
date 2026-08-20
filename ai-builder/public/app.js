@@ -41,7 +41,9 @@ function start() {
   refreshHistory();
   refreshWhitelist();
   refreshWorlds();
+  refreshRewards();
   setInterval(refreshStatus, 15000);
+  setInterval(refreshRewards, 30000);
 }
 
 // Decide up front whether a login is needed at all. On a home network the
@@ -180,8 +182,10 @@ $('#build-form').addEventListener('submit', async (e) => {
     say(`<b>${r.name}</b> — ${r.summary || ''}<br>`
       + `${r.blocks.toLocaleString()} blocks · ${r.size.x}×${r.size.y}×${r.size.z} · `
       + `${r.seconds}s · at ${r.origin.x}, ${r.origin.y}, ${r.origin.z}`
+      + (r.price ? ` · cost ${r.price} credits, ${r.wallet.credits} left` : '')
       + (r.undoable ? '' : '<br><em>Undo is not available for this one.</em>'), 'ok');
     refreshHistory();
+    refreshRewards();
     $('#map').contentWindow.location.reload();
   } catch (ex) {
     say(ex.message, 'bad');
@@ -436,6 +440,76 @@ async function refreshWhitelist() {
     }));
   } catch { ul.innerHTML = '<li class="muted">could not load</li>'; }
 }
+
+// ---------- builders (earn-it mode) ----------
+
+// The whole card stays hidden when REWARDS_MODE=off, which is the default -
+// nobody who hasn't switched this on should ever see a credit.
+const EARN_TEXT = {
+  placed: 'Credits are earned by placing blocks by hand — one credit per block.',
+  mixed: 'Credits are earned by placing blocks, mining, crafting and exploring.',
+  granted: 'Credits are not earned in game — you hand them out below.',
+};
+
+async function refreshRewards() {
+  const card = $('#rewards-card');
+  let r;
+  try { r = await api('/api/rewards'); } catch { return; }
+  if (!r.mode || r.mode === 'off') { card.hidden = true; return; }
+  card.hidden = false;
+
+  $('#rewards-how').textContent = `${EARN_TEXT[r.earn] || ''}`
+    + (r.useCredits ? ` A small build costs ${r.prices.small}, a big one ${r.prices.large}.` : '');
+
+  const ul = $('#rewards-list');
+  ul.innerHTML = r.players.length
+    ? r.players.map((p) => {
+      const pct = Math.min(100, Math.round((p.credits / Math.max(1, r.prices.small)) * 100));
+      const from = Object.entries(p.earned || {})
+        .filter(([, v]) => v > 0)
+        .map(([k, v]) => `${v.toLocaleString()} ${k}`)
+        .join(' · ');
+      return `<li class="builder">
+        <div class="who">
+          <b>${esc(p.player)}</b>
+          ${r.useRanks ? `<span class="rank">${esc(p.rank.name)}</span>` : ''}
+          ${p.exempt ? '<span class="rank">builds free</span>' : ''}
+        </div>
+        ${r.useCredits ? `<div class="wallet">${p.credits.toLocaleString()} credits</div>
+          <div class="bar"><i style="width:${pct}%"></i></div>` : ''}
+        <div class="from muted">
+          ${p.builds} build${p.builds === 1 ? '' : 's'}
+          ${from ? ` · earned from ${esc(from)}` : ''}
+          ${p.granted ? ` · ${p.granted.toLocaleString()} given` : ''}
+          ${r.useRanks && p.rank.next
+            ? ` · ${Math.max(0, p.rank.next.at - p.lifetime).toLocaleString()} to ${esc(p.rank.next.name)}`
+            : ''}
+        </div>
+      </li>`;
+    }).join('')
+    : '<li class="muted">nobody has earned anything yet</li>';
+}
+
+$('#grant-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const err = $('#grant-err');
+  err.hidden = true;
+  try {
+    const r = await api('/api/rewards/grant', {
+      name: $('#grant-name').value.trim(),
+      credits: Number($('#grant-credits').value),
+    });
+    err.textContent = `${r.player} now has ${r.credits.toLocaleString()} credits.`;
+    err.style.color = 'var(--accent)';
+    err.hidden = false;
+    $('#grant-name').value = '';
+    refreshRewards();
+  } catch (ex) {
+    err.textContent = ex.message;
+    err.style.color = 'var(--danger)';
+    err.hidden = false;
+  }
+});
 
 // ---------- worlds ----------
 

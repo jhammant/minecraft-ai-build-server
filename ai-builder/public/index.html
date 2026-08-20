@@ -127,6 +127,25 @@
       <h3>Allowed to join</h3>
       <ul id="wl-list"><li class="muted">loading…</li></ul>
     </div>
+
+    <!-- Only drawn when REWARDS_MODE is something other than off. -->
+    <div class="card rewards" id="rewards-card" hidden>
+      <h2>Builders</h2>
+      <p class="muted" id="rewards-how"></p>
+      <ul id="rewards-list"><li class="muted">nobody has earned anything yet</li></ul>
+
+      <h3>Give credits</h3>
+      <p class="muted">
+        For the effort the server can't see — chores, homework, reading, being
+        kind to a sibling.
+      </p>
+      <form id="grant-form" class="row">
+        <input id="grant-name" placeholder="their Minecraft name" required>
+        <input id="grant-credits" type="number" value="150" step="10" inputmode="numeric">
+        <button type="submit">Give</button>
+      </form>
+      <p class="err" id="grant-err" hidden></p>
+    </div>
   </section>
 
   <!-- WORLDS -->

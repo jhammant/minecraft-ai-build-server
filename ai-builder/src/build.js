@@ -143,7 +143,18 @@ function saveShot(dir, id, spans, log) {
   }
 }
 
-export function createBuilder({ env, limits, state, saveState, log }) {
+// With REWARDS_MODE=off (the default) the builder must behave exactly as it did
+// before rewards existed, so an absent ledger is a ledger that charges nothing
+// and caps nothing.
+const NO_REWARDS = {
+  enabled: () => false,
+  check: () => null,
+  quote: () => ({ band: null, price: 0, affordable: true }),
+  charge: () => null,
+  limitsFor: (_player, base) => base,
+};
+
+export function createBuilder({ env, limits, state, saveState, log, rewards = NO_REWARDS }) {
   let busy = false;
   // A single "Thinking..." then silence for four minutes reads as a hang. Track
   // what the build is actually doing so the panel can show it.
@@ -217,6 +228,15 @@ export function createBuilder({ env, limits, state, saveState, log }) {
     if (!description || description.trim().length < 3) {
       throw new Error('Tell me what to build, e.g. "a wizard tower"');
     }
+    // Checked before the model is asked anything: if they can't afford the
+    // cheapest build on the board, there is no point paying for a plan just to
+    // find out this one costs more.
+    const broke = rewards.check(player);
+    if (broke) throw new Error(broke);
+
+    // Rank only ever narrows the server's envelope (see limitsFor), so this is
+    // safe to hand straight to the validator.
+    const lim = rewards.limitsFor(player, limits);
 
     busy = true;
     const started = Date.now();
@@ -229,7 +249,7 @@ export function createBuilder({ env, limits, state, saveState, log }) {
         // Load the area BEFORE probing it. In an unloaded chunk every
         // `execute if block` fails, which reads as "solid" and sends the
         // surface search to the world ceiling.
-        const p = limits.maxExtent;
+        const p = lim.maxExtent;
         await rcon.send(`forceload add ${at.x - p} ${at.z - p} ${at.x + p} ${at.z + p}`).catch(() => {});
         await new Promise((r) => setTimeout(r, 1200));
         originY = Number.isFinite(at.y) ? Math.floor(at.y) : await findSurfaceY(rcon, at.x, at.z);
@@ -244,12 +264,20 @@ export function createBuilder({ env, limits, state, saveState, log }) {
       setProgress('thinking', `Designing "${description}"`, 0, 0);
       notify(`Thinking about "${description}"...`, 'info');
 
-      const verify = (plan) => validatePlan(plan, { x: 0, y: originY, z: 0 }, limits);
+      const verify = (plan) => validatePlan(plan, { x: 0, y: originY, z: 0 }, lim);
       const onAttempt = (n, of) => setProgress('thinking',
         n === 1 ? `Designing "${description}"` : `Retry ${n} of ${of} — the first plan didn't pass the safety check`, 0, 0);
       const { plan, verified, usage, attempts, model } = await generateBuildPlan(
         description, env, verify, { onAttempt },
       );
+
+      // Now the plan exists, its real size is known - so a hut costs a hut and
+      // a castle costs a castle. Refused here, nothing has been placed yet.
+      const bill = rewards.quote(player, verified.blocks);
+      if (!bill.affordable) {
+        throw new Error(`"${plan.name}" is a ${bill.band} build and costs ${bill.price} credits `
+          + `- you have ${bill.credits}. Ask for something smaller, or go and build a bit more!`);
+      }
 
       let origin;
       if (placement.mode === 'at') {
@@ -288,7 +316,7 @@ export function createBuilder({ env, limits, state, saveState, log }) {
       setProgress('placing', `Building "${plan.name}"`, 0, commands.length);
       notify(`Building "${plan.name}" - ${verified.blocks} blocks...`, 'progress');
 
-      const pad = limits.maxExtent;
+      const pad = lim.maxExtent;
       await rcon.send(
         `forceload add ${origin.x - pad} ${origin.z - pad} ${origin.x + pad} ${origin.z + pad}`,
       ).catch(() => {});
@@ -335,6 +363,9 @@ export function createBuilder({ env, limits, state, saveState, log }) {
       ).catch(() => {});
 
       const seconds = Number(((Date.now() - started) / 1000).toFixed(1));
+      // Charged only once the blocks are actually in the ground: a build that
+      // fell over halfway is not one they should have paid for.
+      const wallet = rewards.charge(player, bill.price);
       state.builds[player] = [...(state.builds[player] || []), Date.now()];
       state.lastBuild[player] = {
         name: plan.name, at: Date.now(), origin, blocks: verified.blocks, snap,
@@ -354,6 +385,7 @@ export function createBuilder({ env, limits, state, saveState, log }) {
           ops: plan.ops.length, commands: commands.length, model,
           shot: saveShot(`${env.STATE_DIR || '/state'}/shots`, builtAt, verified.spans, log),
           size: verified.size, cost, materials: topMaterials(verified.spans),
+          price: bill.price || 0, band: bill.band,
           // Kept so a build can be located (and cleared) even if its undo
           // snapshot failed.
           region, undoable: Boolean(snap) },
@@ -366,6 +398,7 @@ export function createBuilder({ env, limits, state, saveState, log }) {
         size: verified.size, origin, seconds, model, attempts,
         undoable: Boolean(snap), usage,
         cost, spentToday: spentToday(), dailyCostLimit,
+        price: bill.price || 0, band: bill.band, wallet,
       };
     } finally {
       busy = false;

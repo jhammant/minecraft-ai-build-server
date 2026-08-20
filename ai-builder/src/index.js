@@ -3,6 +3,7 @@ import path from 'node:path';
 import { Rcon } from './rcon.js';
 import { describeBackend } from './llm.js';
 import { createBuilder, ValidationError } from './build.js';
+import { createRewards } from './rewards.js';
 import { startWebServer } from './web.js';
 
 const env = process.env;
@@ -57,7 +58,11 @@ function saveState(s) {
 const state = loadState();
 state.history ||= [];
 
-const builder = createBuilder({ env, limits: LIMITS, state, saveState, log });
+// Off unless REWARDS_MODE says otherwise, in which case the AI builder has to
+// be earned rather than simply asked for.
+const rewards = createRewards({ env, state, saveState, log });
+
+const builder = createBuilder({ env, limits: LIMITS, state, saveState, log, rewards });
 
 // --- talking to players ------------------------------------------------------
 
@@ -87,6 +92,11 @@ async function handleBuild(rcon, player, description) {
     await tell(rcon, player, r.undoable
       ? `Built in ${r.seconds}s. Don't like it? Type !undo`
       : `Built in ${r.seconds}s. (Undo isn't available for this one.)`, 'gray');
+    if (r.price) {
+      await tell(rcon, player,
+        `That ${r.band} build cost ${r.price} credits - you have ${r.wallet.credits} left.`,
+        'gray');
+    }
     await broadcast(rcon, `${player} built "${r.name}" with the AI builder`);
   } catch (err) {
     log('build failed:', err.stack || err.message);
@@ -107,11 +117,45 @@ async function handleUndo(rcon, player) {
   }
 }
 
+// What you've earned, what it buys, and what earns more of it.
+async function handleCredits(rcon, player) {
+  if (!rewards.enabled()) {
+    return tell(rcon, player, 'Builds are free on this server - just type !build', 'gray');
+  }
+  const s = rewards.summary(player);
+  const cfg = rewards.config();
+  if (s.exempt) return tell(rcon, player, 'You build for free on this server.', 'gray');
+
+  await tell(rcon, player, '--- Your building record ---', 'gold');
+  if (cfg.useCredits) {
+    await tell(rcon, player, `${s.credits} credits`, 'green');
+    await tell(rcon, player,
+      `A small build costs ${s.prices.small}, a medium one ${s.prices.medium}, `
+      + `a big one ${s.prices.large}.`, 'white');
+  }
+  if (cfg.useRanks) {
+    await tell(rcon, player, `Rank: ${s.rank.name} (${s.rank.index + 1} of 4)`, 'aqua');
+    await tell(rcon, player, s.rank.next
+      ? `${Math.max(0, s.rank.next.at - s.lifetime)} more to ${s.rank.next.name}, `
+        + 'which lets me build you something bigger.'
+      : 'Top rank - nothing I build for you is too big now.', 'white');
+  }
+  const how = {
+    placed: 'Every block you place yourself earns 1 credit.',
+    mixed: 'Placing blocks, mining, crafting and exploring all earn credits.',
+    granted: 'Credits are handed out by a grown-up, not earned in game.',
+  }[cfg.earn];
+  await tell(rcon, player, how, 'gray');
+}
+
 async function handleHelp(rcon, player) {
   const lines = [
     ['--- AI Builder ---', 'gold'],
     ['!build <what you want>  - e.g. !build a pirate ship', 'white'],
     ['!undo                   - remove the last thing I built', 'white'],
+    ...(rewards.enabled()
+      ? [['!credits                - what you have earned, and what it buys', 'white']]
+      : []),
     ['!help                   - this message', 'white'],
     ['Tip: say what it is made of, how big, and what is inside!', 'gray'],
   ];
@@ -125,6 +169,9 @@ async function dispatch(rcon, player, text) {
   switch (cmd.toLowerCase()) {
     case 'build': return handleBuild(rcon, player, arg);
     case 'undo': return handleUndo(rcon, player);
+    case 'credits':
+    case 'points':
+    case 'rank': return handleCredits(rcon, player);
     case 'help':
     case 'ai': return handleHelp(rcon, player);
     default: return;
@@ -209,6 +256,24 @@ async function main() {
     }
   }, 30000);
 
+  // Earning happens on a timer rather than on an event, because there is no
+  // event to hook: the effort we pay for is recorded in the server's own
+  // statistics files, which we diff against the last reading.
+  if (rewards.enabled()) {
+    const cfg = rewards.config();
+    log(`rewards: ${cfg.mode}, earned from ${cfg.earn}, `
+      + `every ${cfg.pollSec}s${cfg.exempt.length ? `, exempt: ${cfg.exempt.join(', ')}` : ''}`);
+    setInterval(async () => {
+      try {
+        for (const { player, rank } of await rewards.poll(rcon)) {
+          await broadcast(rcon, `${player} is now a ${rank}!`, 'gold');
+          await tell(rcon, player, `You've been promoted to ${rank} - `
+            + 'I can build you bigger things now.', 'gold');
+        }
+      } catch (e) { log('rewards poll failed:', e.message); }
+    }, Math.max(5, cfg.pollSec) * 1000);
+  }
+
   tailLog(LOG_PATH, (line) => {
     const chat = parseChat(line);
     if (!chat || !chat.text.startsWith('!')) return;
@@ -218,7 +283,7 @@ async function main() {
   log(`watching ${LOG_PATH}`);
 
   startWebServer({
-    env, state, saveState, builder, log,
+    env, state, saveState, builder, rewards, log,
     getRcon: () => rcon,
     broadcast: (msg) => broadcast(rcon, msg),
   });
