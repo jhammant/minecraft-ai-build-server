@@ -21,18 +21,32 @@ In game, anyone types:
 !undo
 ```
 
-In the browser: move the map, describe what you want, press **Build it**. Add a
-friend to the whitelist in ten seconds. Create a new world from a dropdown.
+In the browser: move the map, describe what you want, press **Build it**. Watch
+the phase and the fill count while it works. Add a friend to the whitelist in ten
+seconds. Create a new world from a dropdown, and set its game mode.
 
 Real output from a build:
 
 ```text
-Wizard Tower — A tall tower with a spiral staircase and a glowing crystal on top!
-1,925 blocks · 13×39×13 · 11.5s · at 250, 64, 250
+Round Watchtower — A cozy round stone tower with a pointy roof and a door to peek from!
+2,757 blocks · 15×32×15 · 12s · 0.6p · at -1250, 71, 1250
 ```
 
-About **half a penny and ~15 seconds** per build using Kimi K2.6 via OpenRouter.
-It also runs against a local model for free.
+From about **half a penny** for a small build to **5p** for a 200,000-block
+castle, using Kimi K2.6 via OpenRouter. It also runs against a local model for
+free.
+
+Every build keeps a record you can open: the exact words that were typed, the
+blocks, the size, how many shapes became how many `/fill`s, what it cost, and a
+**picture drawn from the block data itself** — so the history is a gallery, not a
+list of numbers.
+
+| | |
+|---|---|
+| **Where** | *Show me on the map* flies the 3D map to it; *Teleport me there* puts the player on top of it |
+| **The world** | Day · Night · Clear skies · Rain, one button each |
+| **Worlds** | Each gets its own game mode — a creative world for building, survival for playing |
+| **By hand** | WorldEdit is installed, so they can reshape whatever the AI puts down |
 
 ## Why it's safe to point an LLM at your kid's world
 
@@ -55,9 +69,24 @@ flowchart LR
 ```
 
 A hallucinating — or prompt-injected — model can at worst produce a plan that
-gets rejected. Limits live in `.env`: 150,000 blocks, 96 per axis, 20 builds/hour
-per player, 60/hour server-wide, and a daily spend ceiling read from the API's
-own reported cost.
+gets rejected. Limits live in `.env`: 400,000 blocks, 120 per axis, 400 shapes,
+20 builds/hour per player, 60/hour server-wide, and a daily spend ceiling read
+from the API's own reported cost. Lava, fire and TNT are behind a single
+`ALLOW_HAZARD_BLOCKS` switch, off by default.
+
+**Taste is not enforced in code.** An earlier version rejected plans it judged
+drab, and spent its time refusing a white yacht for being white and a black
+volcano for being black. Style guidance belongs in the system prompt; the
+validator only decides what is *safe*.
+
+### Putting it on the ground
+
+Finding the surface by searching down from the sky lands you on the tree canopy,
+which is how builds end up floating over a forest. The probe walks down through
+leaves, logs, vines and snow until it hits real ground, and the footprint is
+measured across all nine corners rather than the centre alone. Trees standing
+inside the footprint are cleared *after* the undo snapshot is taken, so undo puts
+the wood back.
 
 ### Undo that actually restores
 
@@ -108,7 +137,7 @@ exposing the server safely.
 ## Tests
 
 ```bash
-cd ai-builder && npm test    # 32 unit: geometry, validator, network trust
+cd ai-builder && npm test    # 49 unit: geometry, validator, network trust
 ./scripts/mc test            # 13 end-to-end against a live server
 ```
 
@@ -143,6 +172,18 @@ Things that cost real time:
   shapes keeps responses small and, crucially, checkable.
 - **Vertical extrusion.** A 30-block tower costs the same number of commands as
   a 1-block ring: compute the 2D cross-section once, extrude it.
+- **The top of a forest is not the ground.** A binary search from the sky stops
+  at the first non-air block, and in a forest that is the canopy — so builds sat
+  on the treetops. Walk down through the foliage before deciding where the floor
+  is.
+- **Don't let a quality heuristic block the user.** A rule that scored palettes
+  and rejected "drab" plans looked reasonable and was wrong often enough to make
+  the product feel broken — every rejection costs another slow round trip. Safety
+  checks are hard; taste is a prompt.
+- **Photograph the data, not the world.** Screenshotting builds meant flying a
+  camera blind through a URL, and most shots landed inside a wall. Rendering the
+  plan directly — isometric, straight from the spans — is faster, always framed,
+  and needs no game running. The PNG encoder is 50 lines on `node:zlib`.
 
 ## Version pinning
 
@@ -153,7 +194,7 @@ build yet; ViaVersion lets newer clients connect anyway. Minecraft 26.1+ require
 ## Stack
 
 Paper · Multiverse-Core · LuckPerms · CoreProtect · Geyser + Floodgate ·
-ViaVersion · BlueMap · Chunky. The builder is plain Node with **zero npm
+ViaVersion · BlueMap · Chunky · WorldEdit. The builder is plain Node with **zero npm
 dependencies** — RCON, the web panel and the LLM calls are all implemented
 directly.
 
