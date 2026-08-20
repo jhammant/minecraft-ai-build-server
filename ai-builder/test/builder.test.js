@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   planToSpans, spansToCommands, spansBounds, totalBlocks, spanVolume,
 } from '../src/compile.js';
-import { validatePlan, ValidationError, WORLD_MAX_Y } from '../src/validate.js';
+import { validatePlan, ValidationError, WORLD_MAX_Y, paletteNote } from '../src/validate.js';
 
 const LIMITS = { maxBlocks: 150000, maxExtent: 96, maxOps: 200 };
 const ORIGIN = { x: 100, y: 64, z: -200 };
@@ -394,10 +394,14 @@ test('a gable roof steps inward as it rises', () => {
     material: 'deepslate_tiles', pitch: 1, overhang: 1,
   }));
   assert.ok(spans.length >= 4);
-  const lowest = spans.find((s) => s.y1 === 10);
-  const highest = spans.reduce((a, s) => (s.y1 > a.y1 ? s : a), spans[0]);
-  assert.ok((highest.x2 - highest.x1) < (lowest.x2 - lowest.x1),
-    'the ridge must be narrower than the eaves');
+  // A shell roof emits several thin spans per course, so compare the EXTENT of
+  // the lowest course against the highest, not one span against another.
+  const extentAt = (y) => {
+    const at = spans.filter((s) => s.y1 === y);
+    return Math.max(...at.map((s) => s.x2)) - Math.min(...at.map((s) => s.x1));
+  };
+  const top = Math.max(...spans.map((s) => s.y1));
+  assert.ok(extentAt(top) < extentAt(10), 'the ridge must be narrower than the eaves');
 });
 
 test('repeat multiplies its child along a step', () => {
@@ -428,4 +432,121 @@ test('hazard blocks are gated by the allowHazards flag, command blocks never', (
   assert.ok(validatePlan(lava, ORIGIN, { ...base, allowHazards: true }).blocks > 0);
   const cb = plan({ op: 'cuboid', x1: 0, y1: 0, z1: 0, x2: 1, y2: 1, z2: 1, material: 'command_block' });
   assert.throws(() => validatePlan(cb, ORIGIN, { ...base, allowHazards: true }), ValidationError);
+});
+
+// --- stairs and orient --------------------------------------------------------
+
+test('a stairs flight rises one block per step and its treads carry facing', () => {
+  const spans = planToSpans(plan({
+    op: 'stairs', x: 0, y: 0, z: 0, dir: 'south', steps: 5, width: 2, material: 'oak_stairs',
+  }));
+  const treads = spans.filter((s) => s.material.includes('facing=south'));
+  assert.equal(treads.length, 5, 'one tread per step');
+  for (const t of treads) assert.ok(t.material.includes('half=bottom'));
+  assert.deepEqual(treads.map((t) => t.y1).sort((a, b) => a - b), [0, 1, 2, 3, 4],
+    'each step rises exactly one block');
+  assert.deepEqual(treads.map((t) => t.z1).sort((a, b) => a - b), [0, 1, 2, 3, 4],
+    'and advances one block along dir (south = +z)');
+  for (const t of treads) assert.equal(t.x2 - t.x1 + 1, 2, 'tread is `width` wide across the climb');
+  // and the flight is walkable: air is cut above each tread
+  const air = spans.filter((s) => s.material === 'air');
+  assert.equal(air.length, 5);
+  for (const a of air) assert.equal(a.y2 - a.y1 + 1, 3, 'three blocks of headroom');
+});
+
+test('stairs support columns reach down to the base y', () => {
+  const spans = planToSpans(plan({
+    op: 'stairs', x: 0, y: 10, z: 0, dir: 'east', steps: 4, width: 1, material: 'stone_bricks',
+  }));
+  const supports = spans.filter((s) => s.material === 'stone_bricks');
+  assert.equal(supports.length, 3, 'the ground-level tread needs no column');
+  for (const s of supports) assert.equal(s.y1, 10, 'every column reaches the base y');
+  const tallest = supports.find((s) => s.y2 === 12);
+  assert.ok(tallest, 'the top tread (y=13) stands on a 10..12 column');
+  // support: false turns the columns off entirely
+  const bare = planToSpans(plan({
+    op: 'stairs', x: 0, y: 10, z: 0, dir: 'east', steps: 4, width: 1,
+    material: 'stone_bricks', support: false,
+  }));
+  assert.ok(!bare.some((s) => s.material === 'stone_bricks' && s.y2 - s.y1 > 0));
+});
+
+test('orient injects an outward facing on stair materials', () => {
+  const spans = planToSpans(plan({
+    op: 'cuboid', x1: 0, y1: 0, z1: 0, x2: 4, y2: 0, z2: 4,
+    material: 'oak_stairs', orient: 'outward',
+  }));
+  const facing = (s) => (s.material.match(/facing=(\w+)/) || [])[1];
+  const west = spans.filter((s) => facing(s) === 'west');
+  const east = spans.filter((s) => facing(s) === 'east');
+  const north = spans.filter((s) => facing(s) === 'north');
+  const south = spans.filter((s) => facing(s) === 'south');
+  assert.ok(west.length && east.length && north.length && south.length,
+    'all four outward normals should appear');
+  assert.ok(west.every((s) => s.x1 === 0 && s.x2 === 0), 'west face hugs x=0');
+  assert.ok(east.every((s) => s.x1 === 4 && s.x2 === 4), 'east face hugs x=4');
+  const interior = spans.filter((s) => !facing(s));
+  assert.ok(interior.length > 0, 'interior blocks keep the plain material');
+  assert.ok(interior.every((s) => s.x1 >= 1 && s.x2 <= 3 && s.z1 >= 1 && s.z2 <= 3));
+});
+
+test('orient=inward flips the normal, and slabs get a type instead', () => {
+  const spans = planToSpans(plan({
+    op: 'cuboid', x1: 0, y1: 0, z1: 0, x2: 2, y2: 0, z2: 0,
+    material: 'oak_stairs', orient: 'inward',
+  }));
+  const west = spans.find((s) => s.x1 === 0);
+  assert.match(west.material, /facing=east/, 'inward faces away from the outward normal');
+  const slabs = planToSpans(plan({
+    op: 'cuboid', x1: 0, y1: 0, z1: 0, x2: 4, y2: 0, z2: 4,
+    material: 'stone_slab', orient: 'outward',
+  }));
+  assert.ok(slabs.every((s) => s.material === 'stone_slab[type=top]'));
+});
+
+test('orient leaves plain blocks like stone_bricks unchanged', () => {
+  const spans = planToSpans(plan({
+    op: 'cuboid', x1: 0, y1: 0, z1: 0, x2: 4, y2: 2, z2: 4,
+    material: 'stone_bricks', orient: 'outward',
+  }));
+  assert.equal(spans.length, 1, 'no face splitting for a non-stair material');
+  assert.equal(spans[0].material, 'stone_bricks');
+});
+
+test('validation rejects a bad stairs dir and a bad orient value', () => {
+  assert.throws(() => validatePlan(plan({
+    op: 'stairs', x: 0, y: 0, z: 0, dir: 'up', steps: 4, material: 'oak_stairs',
+  }), ORIGIN, LIMITS), ValidationError);
+  assert.throws(() => validatePlan(plan({
+    op: 'cuboid', x1: 0, y1: 0, z1: 0, x2: 1, y2: 1, z2: 1,
+    material: 'oak_stairs', orient: 'sideways',
+  }), ORIGIN, LIMITS), ValidationError);
+  // and a well-formed flight passes
+  assert.ok(validatePlan(plan({
+    op: 'stairs', x: 0, y: 0, z: 0, dir: 'north', steps: 6, material: 'oak_stairs',
+  }), ORIGIN, LIMITS).blocks > 0);
+});
+
+// Taste is the model's job. The validator used to refuse a white yacht and a
+// black volcano for being "one shade" - both correct answers - so a monochrome
+// build is now allowed through and merely noted.
+test('a monochrome build is allowed, not rejected', () => {
+  const plan = { name: 'yacht', ops: [
+    { op: 'cuboid', x1: 0, y1: 0, z1: 0, x2: 30, y2: 8, z2: 14, material: 'white_concrete' },
+  ] };
+  assert.doesNotThrow(() => validatePlan(plan, { x: 0, y: 80, z: 0 },
+    { maxBlocks: 400000, maxExtent: 120, maxOps: 400 }));
+});
+
+test('paletteNote flags a dark monotone build without blocking it', () => {
+  const spans = [{ x1: 0, y1: 0, z1: 0, x2: 40, y2: 20, z2: 40, material: 'deepslate' }];
+  assert.match(paletteNote(spans) || '', /deepslate/);
+});
+
+test('paletteNote stays quiet when lava lights a dark build', () => {
+  const spans = [
+    { x1: 0, y1: 0, z1: 0, x2: 40, y2: 20, z2: 40, material: 'blackstone' },
+    { x1: 10, y1: 0, z1: 10, x2: 20, y2: 20, z2: 20, material: 'lava' },
+  ];
+  assert.equal(paletteNote(spans), null);
 });

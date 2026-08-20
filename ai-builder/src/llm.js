@@ -57,7 +57,9 @@ function extractJson(text) {
   }
 }
 
-async function callOnce(cfg, messages, { timeoutMs = 120000 } = {}) {
+// A detailed plan with layer grids is a long generation - K3 routinely needs
+// well over two minutes. Too short an abort looks exactly like a hang.
+async function callOnce(cfg, messages, { timeoutMs = Number(process.env.LLM_TIMEOUT_MS || 420000) } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -112,13 +114,16 @@ async function callOnce(cfg, messages, { timeoutMs = 120000 } = {}) {
  * back to the model and let it try again - a rejected plan is usually one bad
  * op, and the model fixes it readily when told exactly what failed.
  */
-export async function generateBuildPlan(description, env, verify, { attempts = 3 } = {}) {
+export async function generateBuildPlan(description, env, verify, {
+  attempts = 3, onAttempt,
+} = {}) {
   const cfg = backendConfig(env);
   const messages = buildMessages(description);
   let lastErr;
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
     let plan;
+    if (onAttempt) onAttempt(attempt, attempts);
     try {
       const result = await callOnce(cfg, messages);
       plan = result.plan;
@@ -126,6 +131,13 @@ export async function generateBuildPlan(description, env, verify, { attempts = 3
       return { plan, verified, usage: result.usage, attempts: attempt, model: cfg.model };
     } catch (err) {
       lastErr = err;
+      if (typeof console !== 'undefined' && plan) {
+        // Log the shape that failed - a bare error message with no example of
+        // what the model actually sent is very hard to act on.
+        const offending = (plan.ops || []).find((o) => o && o.op === 'layer');
+        console.log(`  plan rejected (attempt ${attempt}): ${err.message}`
+          + (offending ? ` | first layer op keys: ${Object.keys(offending).join(',')}` : ''));
+      }
       if (attempt === attempts) break;
       // Feed the failure back so the retry is informed rather than random.
       if (plan) {

@@ -8,3 +8,5 @@ state/
 *.log
 .DS_Store
 scratch/
+out/
+ai-builder/out/
