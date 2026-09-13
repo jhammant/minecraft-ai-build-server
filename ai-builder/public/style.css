@@ -58,6 +58,10 @@ header {
   position: sticky; top: 0; z-index: 5;
   display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
   padding: .7rem 1rem;
+  /* Opened from the home screen, the page runs under the status bar. */
+  padding-top: max(.7rem, env(safe-area-inset-top));
+  padding-left: max(1rem, env(safe-area-inset-left));
+  padding-right: max(1rem, env(safe-area-inset-right));
   background: var(--panel);
   border-bottom: 1px solid var(--line);
 }
@@ -79,6 +83,7 @@ nav button:hover { color: var(--text); }
 nav button.active { background: var(--panel-2); color: var(--text); border-color: var(--line); }
 
 .tab { display: none; padding: 1rem; max-width: 1400px; margin: 0 auto; }
+.tab { padding-bottom: max(1rem, env(safe-area-inset-bottom)); }
 .tab.active { display: block; }
 
 /* ---------- build ---------- */
@@ -122,6 +127,26 @@ button.secondary { background: var(--panel-2); color: var(--text); border-color:
   font-size: .78rem; font-weight: 500; padding: .3rem .55rem; border-radius: 999px;
 }
 .chip:hover { color: var(--text); }
+
+/* How big? - four big buttons rather than a dropdown, for fingers. */
+.sizes { display: grid; grid-template-columns: repeat(4, 1fr); gap: .35rem; }
+.size { display: block; position: relative; }
+.size input { position: absolute; opacity: 0; pointer-events: none; }
+.size span {
+  display: grid; justify-items: center; gap: .05rem; cursor: pointer;
+  padding: .45rem .3rem; border-radius: 9px; font-size: .88rem; font-weight: 600;
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+}
+.size small { font-size: .7rem; font-weight: 400; color: var(--muted); }
+.size input:checked + span { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.size input:focus-visible + span { outline: 2px solid var(--accent-2); outline-offset: 1px; }
+
+/* Touch screens: bigger targets, no grey flash on tap. */
+@media (pointer: coarse) {
+  button, .size span { -webkit-tap-highlight-color: transparent; }
+  .chip { font-size: .88rem; padding: .5rem .8rem; }
+  .size span { padding: .7rem .3rem; }
+}
 
 .where { display: flex; gap: 1rem; flex-wrap: wrap; }
 .radio, .check { display: flex; align-items: center; gap: .4rem; font-size: .85rem; color: var(--text); }

@@ -4,6 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Minecraft Server</title>
+<!-- Add to Home Screen on an iPad opens this full screen, like an app. -->
+<meta name="theme-color" content="#171b25">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Minecraft">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="stylesheet" href="/style.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>⛏️</text></svg>">
 </head>
@@ -60,10 +68,21 @@
           placeholder="a wizard tower with a spiral staircase and a glowing crystal on top"></textarea>
 
         <div class="examples">
+          <button type="button" class="chip" data-size="small">a cosy house with a front door, a bed, a chest and a crafting table</button>
+          <button type="button" class="chip" data-size="medium">an aquarium with tropical fish, seagrass and coral</button>
+          <button type="button" class="chip" data-size="medium">an animal farm with cows, sheep and chickens in fenced pens</button>
           <button type="button" class="chip">a cosy log cabin with a fireplace</button>
           <button type="button" class="chip">a pirate ship</button>
-          <button type="button" class="chip">a castle with four towers</button>
+          <button type="button" class="chip" data-size="large">a castle with four towers</button>
           <button type="button" class="chip">a giant mushroom house</button>
+        </div>
+
+        <label>How big?</label>
+        <div class="sizes" role="radiogroup" aria-label="How big">
+          <label class="size"><input type="radio" name="size" value="small"><span>Small<small>a hut</small></span></label>
+          <label class="size"><input type="radio" name="size" value="medium" checked><span>Medium<small>a house</small></span></label>
+          <label class="size"><input type="radio" name="size" value="large"><span>Large<small>a castle</small></span></label>
+          <label class="size"><input type="radio" name="size" value="huge"><span>Huge<small>a city</small></span></label>
         </div>
 
         <label>Where?</label>

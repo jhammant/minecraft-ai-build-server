@@ -17,6 +17,9 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
+  // Without the right type, Safari ignores the manifest and "Add to Home
+  // Screen" makes a plain bookmark.
+  '.webmanifest': 'application/manifest+json',
 };
 
 const json = (res, code, body) => {

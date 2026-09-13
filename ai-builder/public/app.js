@@ -36,6 +36,9 @@ function start() {
   $('#app').hidden = false;
   const saved = localStorage.getItem('mc-player');
   if (saved) $('#who').value = saved;
+  const size = localStorage.getItem('mc-size');
+  const sizeInput = size && document.querySelector(`input[name=size][value="${size}"]`);
+  if (sizeInput) sizeInput.checked = true;
   refreshStatus();
   refreshMaps();
   refreshHistory();
@@ -119,9 +122,17 @@ $('#map-refresh').addEventListener('click', () => {
 
 // Scope to the examples block: `.chip` is a shared visual style, and the map
 // Refresh button uses it too - an unscoped selector put "Refresh" in the prompt.
+// A chip can carry a size too, so "a cosy house" doesn't come out castle-sized.
 document.querySelectorAll('.examples .chip').forEach((c) => {
-  c.addEventListener('click', () => { $('#desc').value = c.textContent.trim(); $('#desc').focus(); });
+  c.addEventListener('click', () => {
+    $('#desc').value = c.textContent.trim();
+    const sized = c.dataset.size && document.querySelector(`input[name=size][value="${c.dataset.size}"]`);
+    if (sized) sized.checked = true;
+    $('#desc').focus();
+  });
 });
+
+const chosenSize = () => document.querySelector('input[name=size]:checked')?.value;
 
 document.querySelectorAll('input[name=where]').forEach((r) => {
   r.addEventListener('change', () => {
@@ -158,6 +169,8 @@ $('#build-form').addEventListener('submit', async (e) => {
   const description = $('#desc').value.trim();
   const player = $('#who').value.trim();
   if (player) localStorage.setItem('mc-player', player);
+  const size = chosenSize();
+  if (size) localStorage.setItem('mc-size', size);
 
   let at = {};
   if ($('input[name=where]:checked').value === 'coords') {
@@ -178,7 +191,7 @@ $('#build-form').addEventListener('submit', async (e) => {
   say('Thinking… working out what to build.', '');
   const stop = trackProgress();
   try {
-    const r = await api('/api/build', { description, player, ...at });
+    const r = await api('/api/build', { description, player, size, ...at });
     say(`<b>${r.name}</b> — ${r.summary || ''}<br>`
       + `${r.blocks.toLocaleString()} blocks · ${r.size.x}×${r.size.y}×${r.size.z} · `
       + `${r.seconds}s · at ${r.origin.x}, ${r.origin.y}, ${r.origin.z}`
@@ -266,6 +279,12 @@ const ago = (ts) => {
   return `${Math.floor(s / 86400)}d ago`;
 };
 
+// Doors, beds and animals: the parts a child checks first.
+function inside(b) {
+  const n = (count, one) => (count ? `${count} ${one}${count === 1 ? '' : 's'}` : '');
+  return [n(b.doors, 'door'), n(b.beds, 'bed'), n(b.creatures, 'animal')].filter(Boolean).join(' · ');
+}
+
 // A name and a block count tell you something got built, but not WHAT. Each row
 // opens to show what was actually asked for and what came back.
 function detailHtml(b) {
@@ -279,6 +298,7 @@ function detailHtml(b) {
       ${row('Blocks', b.blocks.toLocaleString())}
       ${row('Size', s)}
       ${row('Shapes', b.ops ? `${b.ops} ops → ${(b.commands || 0).toLocaleString()} fills` : '')}
+      ${row('Inside', inside(b))}
       ${row('Took', b.seconds ? `${b.seconds}s` : '')}
       ${row('Cost', b.cost ? `${(b.cost * 100).toFixed(1)}p` : '')}
       ${row('Where', b.origin ? `${b.origin.x}, ${b.origin.y}, ${b.origin.z}` : '')}
