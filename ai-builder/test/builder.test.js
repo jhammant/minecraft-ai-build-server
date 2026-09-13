@@ -454,6 +454,13 @@ test('a stairs flight rises one block per step and its treads carry facing', () 
   for (const a of air) assert.equal(a.y2 - a.y1 + 1, 3, 'three blocks of headroom');
 });
 
+test('a stairs op given a material with states still produces one valid blockstate', () => {
+  const spans = planToSpans(plan({
+    op: 'stairs', x: 0, y: 0, z: 0, dir: 'east', steps: 1, material: 'oak_stairs[facing=north]',
+  }));
+  assert.equal(spans[0].material, 'oak_stairs[facing=east,half=bottom]');
+});
+
 test('stairs support columns reach down to the base y', () => {
   const spans = planToSpans(plan({
     op: 'stairs', x: 0, y: 10, z: 0, dir: 'east', steps: 4, width: 1, material: 'stone_bricks',

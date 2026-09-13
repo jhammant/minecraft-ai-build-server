@@ -299,7 +299,10 @@ function opToSpans(op) {
         const y = op.y + i;
         const x2 = x + px * (width - 1);
         const z2 = z + pz * (width - 1);
-        const tread = `${m}[facing=${op.dir || 'north'},half=bottom]`;
+        // From the bare id: a material that already carried states would
+        // otherwise become "oak_stairs[facing=north][facing=east,...]", which
+        // no server parses.
+        const tread = `${baseOf(m)}[facing=${op.dir || 'north'},half=bottom]`;
         out.push(span(x, y, z, x2, y, z2, tread));
         if (op.support !== false && y > op.y) {
           out.push(span(x, op.y, z, x2, y - 1, z2, m));
