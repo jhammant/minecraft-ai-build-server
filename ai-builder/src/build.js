@@ -77,9 +77,9 @@ export async function footprintGround(rcon, rect) {
   let low = Infinity;
   for (const x of [rect.x1, mx, rect.x2]) {
     for (const z of [rect.z1, mz, rect.z2]) {
-      const y = await findSurfaceY(rcon, x, z);
-      high = Math.max(high, y);
-      low = Math.min(low, y);
+      // The build sits on the water; the foundation reaches down to the bed.
+      high = Math.max(high, await findSurfaceY(rcon, x, z));
+      low = Math.min(low, await findSurfaceY(rcon, x, z, { throughFluid: true }));
     }
   }
   return { high, low };
@@ -92,7 +92,14 @@ const FOLIAGE = ['#minecraft:leaves', '#minecraft:logs', '#minecraft:replaceable
   'bamboo', 'cactus', 'sugar_cane', 'vine', 'snow'];
 const MAX_CANOPY = 48;       // tallest jungle tree, with room to spare
 
-export async function findSurfaceY(rcon, x, z) {
+// Water and lava are ground to stand on, not foliage to see through - but
+// #minecraft:replaceable lists both, so the probe used to walk through a lake to
+// its bed. A test cottage went up at y 50 under 12 blocks of water, and every
+// door opening it cut filled straight back up. Only the foundation depth still
+// wants the bed, so it asks for `throughFluid`.
+const FLUIDS = ['minecraft:water', 'minecraft:lava'];
+
+export async function findSurfaceY(rcon, x, z, { throughFluid = false } = {}) {
   const isAir = async (y) => /Test passed/i.test(
     await rcon.send(`execute if block ${x} ${y} ${z} air`),
   );
@@ -110,6 +117,16 @@ export async function findSurfaceY(rcon, x, z) {
   // measurement never changes the world before the undo snapshot is taken.
   let y = lo;
   for (let step = 0; step < MAX_CANOPY; step++) {
+    if (!throughFluid) {
+      let fluid = false;
+      for (const kind of FLUIDS) {
+        if (/Test passed/i.test(await rcon.send(`execute if block ${x} ${y} ${z} ${kind}`))) {
+          fluid = true;
+          break;
+        }
+      }
+      if (fluid) break;
+    }
     let leafy = false;
     for (const kind of FOLIAGE) {
       if (/Test passed/i.test(await rcon.send(`execute if block ${x} ${y} ${z} ${kind}`))) {

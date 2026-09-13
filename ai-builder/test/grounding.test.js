@@ -109,3 +109,30 @@ test('a player flying high gets their build in the air, with no pillar under it'
   // Assert
   assert.ok(!world.sent.some((c) => c.endsWith('replace #minecraft:replaceable') && c.includes('cobblestone')));
 });
+
+test('a build over a lake sits on the water, not on the lake bed', async () => {
+  // Arrange: lake bed at y 50, water up to y 62, air from 63 - the live cottage
+  // that was built at y 50 with water in every door opening.
+  const world = fakeWorld({ groundY: 50, waterTo: 63 });
+
+  // Act
+  const ground = await footprintGround(world, { x1: 0, z1: 0, x2: 10, z2: 10 });
+
+  // Assert
+  assert.equal(ground.high, 63, 'the build sits on the water surface');
+  assert.equal(ground.low, 50, 'the foundation still reaches the lake bed');
+});
+
+test('over a lake the foundation fills the water under the build', async () => {
+  // Arrange
+  const world = fakeWorld({ groundY: 50, waterTo: 63 });
+  const v = validatePlan(plan(tower(0, 4)), LOCAL, LIMITS);
+  const ground = await footprintGround(world, { x1: 0, z1: 0, x2: 4, z2: 4 });
+
+  // Act
+  const f = planFoundation(v, { x: 0, y: ground.high, z: 0 }, ground.low);
+
+  // Assert: a plinth from the bed to just under the floor, so the house stands
+  // on stone above the water instead of floating on it.
+  assert.deepEqual([f.bottom, f.top], [50, 62]);
+});

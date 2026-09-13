@@ -8,9 +8,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-export function fakeWorld({ groundY = 64, groundAt, fail = () => null, player = { x: 0.5, y: 64, z: 0.5 } } = {}) {
+export function fakeWorld({
+  groundY = 64, groundAt, waterTo, fail = () => null, player = { x: 0.5, y: 64, z: 0.5 },
+} = {}) {
   const sent = [];
   const heightAt = (x, z) => (groundAt ? groundAt(x, z) : groundY);
+  // Optional water: from the ground up to (not including) waterTo, per column.
+  const waterTop = (x, z) => (typeof waterTo === 'function' ? waterTo(x, z) : waterTo);
+  const isWater = (x, y, z) => waterTop(x, z) !== undefined && y >= heightAt(x, z) && y < waterTop(x, z);
   const vol = (a) => (Math.abs(a[3] - a[0]) + 1) * (Math.abs(a[4] - a[1]) + 1) * (Math.abs(a[5] - a[2]) + 1);
   return {
     sent,
@@ -21,7 +26,10 @@ export function fakeWorld({ groundY = 64, groundAt, fail = () => null, player = 
       let m;
       if ((m = cmd.match(/^execute if block (-?\d+) (-?\d+) (-?\d+) (\S+)$/))) {
         const [x, y, z] = [Number(m[1]), Number(m[2]), Number(m[3])];
-        if (m[4] === 'air') return y >= heightAt(x, z) ? 'Test passed' : 'Test failed';
+        const pass = (ok) => (ok ? 'Test passed' : 'Test failed');
+        if (m[4] === 'air') return pass(y >= heightAt(x, z) && !isWater(x, y, z));
+        // Water is in #minecraft:replaceable on a real server too.
+        if (m[4] === 'minecraft:water' || m[4] === '#minecraft:replaceable') return pass(isWater(x, y, z));
         return 'Test failed';
       }
       if (cmd.startsWith('execute if loaded')) return 'Test passed';
