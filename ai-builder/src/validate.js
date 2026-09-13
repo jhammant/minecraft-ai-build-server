@@ -7,7 +7,7 @@
 // plan that gets rejected.
 
 import { compilePlan, spansBounds, totalBlocks } from './compile.js';
-import { normaliseMaterial, notABlock, baseOf, isDoor, isBed, COLOURS } from './blocks.js';
+import { normaliseMaterial, notABlock, baseOf, isDoor, isBed, COLOURS, CREATURES } from './blocks.js';
 import { detailBoxes, FACINGS, HINGES } from './details.js';
 
 // Minecraft world height limits (1.18+ / 26.x).
@@ -47,11 +47,14 @@ const HAZARD_BLOCKS = new Set([
 ]);
 
 const VALID_OPS = new Set(['layer', 'cuboid', 'cylinder', 'sphere', 'cone', 'pyramid',
-  'crenellate', 'roof', 'repeat', 'stairs', 'door', 'bed']);
+  'crenellate', 'roof', 'repeat', 'stairs', 'door', 'bed', 'creatures']);
 
 // Ops that place something in the details pass rather than draw geometry, so
 // they have nothing for repeat to stretch.
-const DETAIL_OPS = new Set(['door', 'bed']);
+const DETAIL_OPS = new Set(['door', 'bed', 'creatures']);
+
+// Enough for a farm and a fish tank; not enough to lag the server.
+export const MAX_CREATURES = 60;
 
 // More than a village's worth is not a house, it's a runaway loop.
 export const MAX_DOORS = 64;
@@ -123,6 +126,7 @@ function checkOp(op, limits, allowHazards, depth = 0) {
     for (const f of OP_FIELDS.layer) checkNumber(op, f, limits);
     return true;
   }
+  if (op.op === 'creatures') return checkCreatures(op, limits);
   if (op.op === 'door') return checkDoor(op, limits, allowHazards);
   if (op.op === 'bed') return checkBed(op, limits, allowHazards);
   op.material = checkMaterial(op.material, allowHazards);
@@ -161,6 +165,33 @@ function checkDoor(op, limits, allowHazards) {
   }
   if (op.hinge !== undefined && !HINGES.includes(op.hinge)) {
     throw new ValidationError(`door.hinge must be left|right, got ${JSON.stringify(op.hinge)}`);
+  }
+  return true;
+}
+
+// Animals are summoned by the compiler from these fields alone, so the mob
+// must be on the passive allowlist and every coordinate a whole number.
+function checkCreatures(op, limits) {
+  const mob = typeof op.mob === 'string' ? op.mob.trim().toLowerCase().replace(/^minecraft:/, '') : op.mob;
+  if (!CREATURES.has(mob)) {
+    throw new ValidationError(`creatures.mob must be one of ${[...CREATURES].join(', ')} - got ${JSON.stringify(op.mob)}`);
+  }
+  op.mob = mob;
+  if (op.points !== undefined) {
+    if (!Array.isArray(op.points) || op.points.length === 0 || op.points.length > MAX_CREATURES) {
+      throw new ValidationError(`creatures.points must be a list of 1..${MAX_CREATURES} [x,y,z] positions`);
+    }
+    op.points = op.points.map((p) => {
+      const [x, y, z] = Array.isArray(p) ? p : [p?.x, p?.y, p?.z];
+      const pt = { op: 'creatures', x, y, z };
+      for (const f of ['x', 'y', 'z']) checkNumber(pt, f, limits);
+      return [x, y, z];
+    });
+    return true;
+  }
+  for (const f of ['x1', 'z1', 'x2', 'z2', 'y']) checkNumber(op, f, limits);
+  if (!Number.isInteger(op.count) || op.count < 1 || op.count > MAX_CREATURES) {
+    throw new ValidationError(`creatures.count must be 1..${MAX_CREATURES}, got ${JSON.stringify(op.count)}`);
   }
   return true;
 }
@@ -348,7 +379,7 @@ export function validatePlan(plan, origin, limits) {
   // From here on we validate the REAL geometry, so an op can't understate its
   // size. Details count: a door is two real blocks, a bed is two more.
   const compiled = compilePlan(plan);
-  const { spans, doors, beds, blocks: fragile } = compiled;
+  const { spans, doors, beds, blocks: fragile, creatures } = compiled;
   const boxes = [...spans, ...detailBoxes(compiled)];
   if (boxes.length === 0) throw new ValidationError('plan compiles to nothing');
   if (doors.length > MAX_DOORS) throw new ValidationError(`too many doors: ${doors.length} (max ${MAX_DOORS})`);
@@ -380,6 +411,18 @@ export function validatePlan(plan, origin, limits) {
   // NB: this sums span volumes, so overlapping ops are counted more than once.
   // A detailed build therefore reads much larger than the volume it occupies -
   // the ceiling is deliberately generous to allow for that.
+  // Animals go inside the thing built for them, never loose in the world.
+  if (creatures.length > MAX_CREATURES) {
+    throw new ValidationError(`too many creatures: ${creatures.length} (max ${MAX_CREATURES})`);
+  }
+  const stray = creatures.find((c) => c.x < bounds.x1 || c.x > bounds.x2 || c.z < bounds.z1
+    || c.z > bounds.z2 || c.y < bounds.y1 || c.y > bounds.y2);
+  if (stray) {
+    throw new ValidationError(`creatures must be inside the build (x ${bounds.x1}..${bounds.x2}, `
+      + `y ${bounds.y1}..${bounds.y2}, z ${bounds.z1}..${bounds.z2}) - a ${stray.mob} at `
+      + `${stray.x},${stray.y},${stray.z} is not`);
+  }
+
   const blocks = totalBlocks(boxes);
   if (blocks > maxBlocks) {
     throw new ValidationError(`build too heavy: ${blocks} blocks (max ${maxBlocks})`);
@@ -407,7 +450,7 @@ export function validatePlan(plan, origin, limits) {
   const materials = [...new Set(boxes.map((s) => s.material))].filter((m) => m !== 'air');
 
   return {
-    spans, details: { doors, beds, blocks: fragile }, bounds, size, blocks, materials,
+    spans, details: { doors, beds, blocks: fragile }, creatures, bounds, size, blocks, materials,
     // Structure and details together, for drawing the build.
     preview: boxes,
   };

@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import { generateBuildPlan } from './llm.js';
 import { validatePlan, ValidationError, WORLD_MIN_Y, WORLD_MAX_Y } from './validate.js';
-import { spansToCommands, detailCommands } from './compile.js';
+import { spansToCommands, detailCommands, creatureCommands, BUILD_TAG_RE } from './compile.js';
 import { renderIso } from './render-iso.js';
 import { encodePNG } from './png.js';
 import { snapshot, restore, slotFor } from './undo.js';
@@ -263,6 +263,9 @@ export function createBuilder({
 
     busy = true;
     const started = Date.now();
+    // Names this build in the world: every animal it summons carries it, so
+    // undo removes those and nobody else's.
+    const tag = `aib_${started.toString(36)}`;
     try {
       // Decide the ground level first: validation needs origin.y to check the
       // build won't poke through the top or bottom of the world.
@@ -374,6 +377,8 @@ export function createBuilder({
         const commands = [
           ...spansToCommands(verified.spans, origin),
           ...detailCommands(verified.details, origin),
+          // Last of all, so the pen or the tank is there to receive them.
+          ...creatureCommands(verified.creatures, origin, tag),
         ];
         log(`build "${plan.name}" for ${player} at ${origin.x},${origin.y},${origin.z}: `
           + `${verified.blocks} blocks, ${commands.length} commands, ${attempts} attempt(s), ${model}`);
@@ -409,7 +414,7 @@ export function createBuilder({
         let done = 0;
         for (const cmd of commands) {
           const res = await rcon.send(cmd);
-          if (/^(Failed|Unknown|Incorrect|That position|Could not)/i.test(res.trim())) {
+          if (/^(Failed|Unknown|Incorrect|That position|Could not|Unable)/i.test(res.trim())) {
             log(`command rejected: ${cmd} -> ${res.trim().slice(0, 120)}`);
           }
           if (++done % 40 === 0) {
@@ -428,6 +433,7 @@ export function createBuilder({
       state.builds[player] = [...(state.builds[player] || []), Date.now()];
       state.lastBuild[player] = {
         name: plan.name, at: Date.now(), origin, blocks: verified.blocks, snap,
+        tag: verified.creatures.length ? tag : undefined,
       };
       // OpenRouter returns the actual charged cost; fall back to a rough token
       // estimate for backends that don't.
@@ -444,6 +450,7 @@ export function createBuilder({
           ops: plan.ops.length, commands: commands.length, model,
           shot: saveShot(`${env.STATE_DIR || '/state'}/shots`, builtAt, verified.preview, log),
           doors: verified.details.doors.length, beds: verified.details.beds.length,
+          creatures: verified.creatures.length,
           size: verified.size, cost, materials: topMaterials(verified.spans),
           price: bill.price || 0, band: bill.band,
           // Kept so a build can be located (and cleared) even if its undo
@@ -470,7 +477,16 @@ export function createBuilder({
     const last = state.lastBuild[player];
     if (!last) throw new Error("You haven't built anything for me to undo yet.");
     if (!last.snap) throw new Error(`I don't have a snapshot of "${last.name}" to restore.`);
-    await restore(rcon, last.snap);
+    // Keep the site loaded across both steps: the animals are entities, and a
+    // kill only finds entities in loaded chunks.
+    await withForceload(rcon, [padArea(last.snap.region, 16)], async () => {
+      await restore(rcon, last.snap);
+      // The tag is re-checked because it comes back out of state.json.
+      if (last.tag && BUILD_TAG_RE.test(last.tag)) {
+        const res = await rcon.send(`kill @e[type=!minecraft:player,tag=${last.tag}]`);
+        log(`undo "${last.name}": ${String(res).trim() || 'no creatures to remove'}`);
+      }
+    });
     const name = last.name;
     delete state.lastBuild[player];
     saveState(state);

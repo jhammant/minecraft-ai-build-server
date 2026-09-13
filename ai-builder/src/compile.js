@@ -413,8 +413,11 @@ export function compilePlan(plan) {
   const raw = [];
   const doors = [];
   const beds = [];
+  const creatures = [];
   for (const op of plan.ops) {
-    if (op.op === 'door') {
+    if (op.op === 'creatures') {
+      creatures.push(...creaturePositions(op));
+    } else if (op.op === 'door') {
       doors.push({ x: op.x, y: op.y, z: op.z, material: op.material, facing: op.facing, hinge: op.hinge });
     } else if (op.op === 'bed') {
       beds.push({ x: op.x, y: op.y, z: op.z, material: op.material, facing: op.facing });
@@ -422,7 +425,38 @@ export function compilePlan(plan) {
       raw.push(...opToSpans(op));
     }
   }
-  return splitDetails(raw, { doors, beds });
+  return { ...splitDetails(raw, { doors, beds }), creatures };
+}
+
+/**
+ * Where each animal of a creatures op stands, in local coordinates.
+ * Explicit points are used as given; an area is filled on an even lattice -
+ * deterministic, so the same plan always puts the cows in the same places.
+ */
+export function creaturePositions(op) {
+  const mob = op.mob;
+  if (Array.isArray(op.points)) {
+    return op.points.map((p) => (Array.isArray(p)
+      ? { mob, x: p[0], y: p[1], z: p[2] }
+      : { mob, x: p.x, y: p.y, z: p.z }));
+  }
+  const x1 = Math.min(op.x1, op.x2); const x2 = Math.max(op.x1, op.x2);
+  const z1 = Math.min(op.z1, op.z2); const z2 = Math.max(op.z1, op.z2);
+  const count = Math.max(1, op.count ?? 1);
+  const cols = Math.ceil(Math.sqrt(count));
+  const rows = Math.ceil(count / cols);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const c = i % cols;
+    const r = Math.floor(i / cols);
+    out.push({
+      mob,
+      x: x1 + Math.floor(((c + 0.5) * (x2 - x1 + 1)) / cols),
+      y: op.y,
+      z: z1 + Math.floor(((r + 0.5) * (z2 - z1 + 1)) / rows),
+    });
+  }
+  return out;
 }
 
 // Bounding box over all spans, in local coordinates.
@@ -584,4 +618,28 @@ export function detailCommands({ doors = [], beds = [], blocks = [] }, origin) {
     else cmds.push(...spansToCommands([{ ...s, mode: 'solid' }], origin));
   }
   return cmds;
+}
+
+// Fish and axolotls also carry FromBucket, the flag that keeps a caught fish
+// from despawning; PersistenceRequired covers everything else.
+const BUCKETABLE = new Set(['tropical_fish', 'cod', 'salmon', 'axolotl']);
+
+export const BUILD_TAG_RE = /^aib_[a-z0-9]{1,24}$/;
+
+/**
+ * Summon commands, run last, once the pens and tanks exist. Every animal is
+ * tagged with the build's id so undo can take back exactly what this build
+ * put there. The mob id comes from the allowlist, the NBT is fixed here, and
+ * the tag is checked against a strict pattern - nothing in it is model text.
+ */
+export function creatureCommands(creatures, origin, tag) {
+  if (!BUILD_TAG_RE.test(tag)) throw new Error(`bad build tag: ${tag}`);
+  return creatures.map((c) => {
+    const nbt = [
+      'PersistenceRequired:1b',
+      ...(BUCKETABLE.has(c.mob) ? ['FromBucket:1b'] : []),
+      `Tags:["aib","${tag}"]`,
+    ].join(',');
+    return `summon minecraft:${c.mob} ${c.x + origin.x + 0.5} ${c.y + origin.y} ${c.z + origin.z + 0.5} {${nbt}}`;
+  });
 }
