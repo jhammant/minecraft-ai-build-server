@@ -1,0 +1,6 @@
+{
+  "pack": {
+    "description": "iPad/Bedrock players reach up to 12 blocks in creative; let the server accept breaks that far so blocks stop reappearing",
+    "min_format": 71, "max_format": 102, "supported_formats": [71, 102], "pack_format": 102
+  }
+}

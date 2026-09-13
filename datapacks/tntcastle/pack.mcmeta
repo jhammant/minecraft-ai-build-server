@@ -1,0 +1,12 @@
+{
+  "pack": {
+    "description": "Ethan's TNT castle - run: execute in minecraft:tntworld run function tntcastle:build",
+    "min_format": 71,
+    "max_format": 102,
+    "supported_formats": [
+      71,
+      102
+    ],
+    "pack_format": 102
+  }
+}
