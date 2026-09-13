@@ -487,3 +487,20 @@ export function spansToCommands(spans, origin) {
   }
   return cmds;
 }
+
+// Level a site: `material` up to and including `ground`, air above it.
+// Two spans, so no single fill can straddle the ground line. The old loop cut
+// the region into fixed-height slabs and took each slab's block from its bottom
+// row - on a small site one slab ran from below ground to 30 blocks above it,
+// and "flatten" raised a sand tower with the build perched on top.
+export function siteFillCommands(region, ground, material) {
+  const base = { x1: region.x1, z1: region.z1, x2: region.x2, z2: region.z2, mode: 'solid' };
+  const spans = [];
+  if (region.y1 <= ground) {
+    spans.push({ ...base, y1: region.y1, y2: Math.min(ground, region.y2), material });
+  }
+  if (region.y2 > ground) {
+    spans.push({ ...base, y1: Math.max(ground + 1, region.y1), y2: region.y2, material: 'air' });
+  }
+  return spansToCommands(spans, { x: 0, y: 0, z: 0 });
+}

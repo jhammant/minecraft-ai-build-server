@@ -153,6 +153,7 @@ async function addBlueMapWorld(name, type, log) {
 async function prepareSite(rcon, x, z, half, mode, material, log) {
   const { findSurfaceY, footprintSurfaceY } = await import('./build.js');
   const { snapshot } = await import('./undo.js');
+  const { siteFillCommands } = await import('./compile.js');
 
   await rcon.send(`forceload add ${x - half - 16} ${z - half - 16} ${x + half + 16} ${z + half + 16}`)
     .catch(() => {});
@@ -173,14 +174,7 @@ async function prepareSite(rcon, x, z, half, mode, material, log) {
   let snap = null;
   try { snap = await snapshot(rcon, region, 15); } catch (e) { log(`prepare snapshot failed: ${e.message}`); }
 
-  const chunks = [];
-  const LIMIT = 32768;
-  const step = Math.max(1, Math.floor(LIMIT / ((2 * half + 1) * (2 * half + 1))));
-  for (let y = region.y1; y <= region.y2; y += step) {
-    const y2 = Math.min(y + step - 1, region.y2);
-    const block = (y < ground) ? material : (y === ground ? material : 'air');
-    chunks.push(`fill ${region.x1} ${y} ${region.z1} ${region.x2} ${y2} ${region.z2} ${block}`);
-  }
+  const chunks = siteFillCommands(region, ground, material);
   let changed = 0;
   for (const c of chunks) {
     const r = await rcon.send(c);
