@@ -8,7 +8,9 @@
 import fs from 'node:fs';
 import { generateBuildPlan } from './llm.js';
 import { validatePlan, ValidationError, WORLD_MIN_Y, WORLD_MAX_Y } from './validate.js';
-import { spansToCommands, detailCommands, creatureCommands, BUILD_TAG_RE } from './compile.js';
+import {
+  spansToCommands, detailCommands, creatureCommands, BUILD_TAG_RE, planFoundation, foundationCommands,
+} from './compile.js';
 import { renderIso } from './render-iso.js';
 import { encodePNG } from './png.js';
 import { snapshot, restore, slotFor } from './undo.js';
@@ -58,13 +60,29 @@ const reachFor = (bounds) => 4 + Math.max(
 // alone buries anything wider than the terrain is flat - the ground rises under
 // one corner and swallows the build. Sit on the highest point instead.
 export async function footprintSurfaceY(rcon, cx, cz, halfX, halfZ) {
-  const xs = [cx, cx - halfX, cx + halfX, cx, cx, cx - halfX, cx + halfX, cx - halfX, cx + halfX];
-  const zs = [cz, cz, cz, cz - halfZ, cz + halfZ, cz - halfZ, cz + halfZ, cz + halfZ, cz - halfZ];
-  let best = -Infinity;
-  for (let i = 0; i < xs.length; i++) {
-    best = Math.max(best, await findSurfaceY(rcon, xs[i], zs[i]));
+  const { high } = await footprintGround(rcon, {
+    x1: cx - halfX, z1: cz - halfZ, x2: cx + halfX, z2: cz + halfZ,
+  });
+  return high;
+}
+
+// Ground across a footprint {x1,z1,x2,z2}: the highest point (where the build
+// sits, so nothing is buried) and the lowest (how far a foundation must reach
+// so the low side isn't left hanging). Nine samples: corners, edge midpoints
+// and the middle.
+export async function footprintGround(rcon, rect) {
+  const mx = Math.round((rect.x1 + rect.x2) / 2);
+  const mz = Math.round((rect.z1 + rect.z2) / 2);
+  let high = -Infinity;
+  let low = Infinity;
+  for (const x of [rect.x1, mx, rect.x2]) {
+    for (const z of [rect.z1, mz, rect.z2]) {
+      const y = await findSurfaceY(rcon, x, z);
+      high = Math.max(high, y);
+      low = Math.min(low, y);
+    }
   }
-  return best;
+  return { high, low };
 }
 
 // Foliage the probe must see straight through. A binary search from the sky
@@ -347,41 +365,44 @@ export function createBuilder({
         x2: verified.bounds.x2 + ox, z2: verified.bounds.z2 + oz,
       };
 
-      // The ground probe samples a square centred on the origin, which can reach
-      // past a lopsided footprint - so keep that loaded too.
-      const probe = {
-        x1: ox - Math.ceil(verified.size.x / 2), z1: oz - Math.ceil(verified.size.z / 2),
-        x2: ox + Math.ceil(verified.size.x / 2), z2: oz + Math.ceil(verified.size.z / 2),
-      };
-
-      const placed = await withForceload(rcon, [padArea(site, 16), padArea(probe, 16)], async () => {
+      const placed = await withForceload(rcon, [padArea(site, 16)], async () => {
         await waitLoaded(rcon, [{ x: site.x1, y: 0, z: site.z1 }, { x: site.x2, y: 0, z: site.z2 }], 30000);
 
+        // Now the footprint is known, measure the ground across it rather than
+        // trusting the single probe taken before the plan existed. An explicit
+        // height is taken as given, with no foundation.
         let y = originY;
-        if (placement.mode === 'at' && !Number.isFinite(at?.y)) {
-          // Now the footprint is known, re-check the ground across it rather
-          // than trusting the single probe taken before the plan existed.
-          const halfX = Math.ceil(verified.size.x / 2);
-          const halfZ = Math.ceil(verified.size.z / 2);
-          const ground = await footprintSurfaceY(rcon, ox, oz, halfX, halfZ);
-          if (Number.isFinite(ground)
-              && ground + verified.bounds.y2 <= WORLD_MAX_Y
-              && ground + verified.bounds.y1 >= WORLD_MIN_Y) {
-            y = ground;
+        let ground = null;
+        if (!Number.isFinite(at?.y)) {
+          setProgress('placing', 'Measuring the ground', 0, 0);
+          ground = await footprintGround(rcon, site);
+          if (placement.mode === 'at' && Number.isFinite(ground.high)
+              && ground.high + verified.bounds.y2 <= WORLD_MAX_Y
+              && ground.high + verified.bounds.y1 >= WORLD_MIN_Y) {
+            y = ground.high;
           }
         }
         const origin = { x: ox, y, z: oz };
+        // Only a build that meets the ground somewhere gets a foundation. One
+        // summoned in front of a player flying high above it stays in the air,
+        // as they presumably meant.
+        const foundation = ground && ground.high >= y - 1
+          ? planFoundation(verified, origin, ground.low, { minY: WORLD_MIN_Y })
+          : null;
 
         // Structure first, then the details pass: doors, beds and everything
         // that needs a wall or floor to exist before it can stay put.
         const commands = [
+          // Under everything else, so the build has something to stand on.
+          ...foundationCommands(foundation),
           ...spansToCommands(verified.spans, origin),
           ...detailCommands(verified.details, origin),
           // Last of all, so the pen or the tank is there to receive them.
           ...creatureCommands(verified.creatures, origin, tag),
         ];
         log(`build "${plan.name}" for ${player} at ${origin.x},${origin.y},${origin.z}: `
-          + `${verified.blocks} blocks, ${commands.length} commands, ${attempts} attempt(s), ${model}`);
+          + `${verified.blocks} blocks, ${commands.length} commands, ${attempts} attempt(s), ${model}`
+          + (foundation ? `, foundation of ${foundation.material} down to y=${foundation.bottom}` : ''));
 
         setProgress('placing', `Building "${plan.name}"`, 0, commands.length);
         notify(`Building "${plan.name}" - ${verified.blocks} blocks...`, 'progress');
@@ -391,6 +412,9 @@ export function createBuilder({
           z1: verified.bounds.z1 + origin.z, x2: verified.bounds.x2 + origin.x,
           y2: verified.bounds.y2 + origin.y, z2: verified.bounds.z2 + origin.z,
         };
+        // The snapshot reaches down to the foundation, so undo takes that away
+        // too and puts the river back.
+        const snapRegion = foundation ? { ...region, y1: Math.min(region.y1, foundation.bottom) } : region;
         // Take the undo snapshot, retrying once. This is the step that fails
         // when the server is busy (a pre-generation pass, or a big render), and
         // a build with no snapshot can never be undone - so it's worth a retry
@@ -399,7 +423,7 @@ export function createBuilder({
         let snap = null;
         for (let attempt = 1; attempt <= 2 && !snap; attempt++) {
           try {
-            snap = await snapshot(rcon, region, slotFor(player));
+            snap = await snapshot(rcon, snapRegion, slotFor(player));
           } catch (e) {
             log(`SNAPSHOT FAILED (attempt ${attempt}/2) for ${player}: ${e.message}`);
             if (attempt < 2) await new Promise((r) => setTimeout(r, 3000));
@@ -422,9 +446,9 @@ export function createBuilder({
             await new Promise((r) => setTimeout(r, 60));
           }
         }
-        return { origin, region, snap, commands };
+        return { origin, region, snap, commands, foundation };
       });
-      const { origin, region, snap, commands } = placed;
+      const { origin, region, snap, commands, foundation } = placed;
 
       const seconds = Number(((Date.now() - started) / 1000).toFixed(1));
       // Charged only once the blocks are actually in the ground: a build that
@@ -451,6 +475,7 @@ export function createBuilder({
           shot: saveShot(`${env.STATE_DIR || '/state'}/shots`, builtAt, verified.preview, log),
           doors: verified.details.doors.length, beds: verified.details.beds.length,
           creatures: verified.creatures.length,
+          foundation: foundation ? origin.y - foundation.bottom : 0,
           size: verified.size, cost, materials: topMaterials(verified.spans),
           price: bill.price || 0, band: bill.band,
           // Kept so a build can be located (and cleared) even if its undo

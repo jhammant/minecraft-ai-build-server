@@ -643,3 +643,77 @@ export function creatureCommands(creatures, origin, tag) {
     return `summon minecraft:${c.mob} ${c.x + origin.x + 0.5} ${c.y + origin.y} ${c.z + origin.z + 0.5} {${nbt}}`;
   });
 }
+
+// --- foundations -----------------------------------------------------------------
+//
+// A build sits at the HIGHEST ground under its footprint, so nothing is buried.
+// On a slope, or half over a river, that left the low side hanging in the air:
+// a haunted house landed with its floor ten blocks above the water. So the gap
+// is filled - from the lowest ground found up to just under the build - only
+// where it is air or water, and only under the parts of the build that
+// actually touch the ground.
+
+export const FOUNDATION_MAX_DEPTH = 24;
+const FOUNDATION_MAX_RECTS = 64;
+// Air, water, lava and the plants that grow in them. Replacing only these
+// means real ground is never dug out or overwritten.
+const FILLABLE = '#minecraft:replaceable';
+// Blocks that would make a poor or unstable foundation, however much of the
+// base is made of them.
+const NOT_A_FOUNDATION = /^(air|water|lava|sand|red_sand|gravel|farmland|dirt_path|scaffolding|tnt|cake|cactus|barrel|bookshelf|chest|trapped_chest|hay_block|slime_block|honey_block)$|_slab$|_stairs$|_wall$|_fence|_pane$|glass|leaves|_carpet$|concrete_powder|ice$|snow|_door$|_trapdoor$|_shulker_box$|_ore$/;
+
+/**
+ * What to fill under a build, or null if it already sits on the ground.
+ *
+ * @param {object} verified   validatePlan's result (local coordinates)
+ * @param {object} origin     world origin; origin.y is where the build sits
+ * @param {number} lowGround  lowest free block above ground across the footprint
+ * @returns {{bottom:number, top:number, material:string, rects:object[]}|null}
+ */
+export function planFoundation(verified, origin, lowGround, { maxDepth = FOUNDATION_MAX_DEPTH, minY = -64 } = {}) {
+  if (!Number.isFinite(lowGround) || lowGround >= origin.y) return null;
+  const { spans, bounds } = verified;
+  // Drawn starting in mid-air on purpose - a sky island, a floating castle.
+  // Propping it up on a stone pillar would be wrong.
+  if (bounds.y1 > 1) return null;
+  const base = spans.filter((s) => s.y1 <= bounds.y1 + 1 && baseOf(s.material) !== 'air');
+  if (!base.length) return null;
+
+  // Rest it on the parts that touch the ground, not the whole bounding box: a
+  // courtyard or the gap between two towers stays as the land was.
+  const seen = new Set();
+  let rects = [];
+  for (const s of base) {
+    const r = { x1: s.x1 + origin.x, z1: s.z1 + origin.z, x2: s.x2 + origin.x, z2: s.z2 + origin.z };
+    const k = `${r.x1},${r.z1},${r.x2},${r.z2}`;
+    if (!seen.has(k)) { seen.add(k); rects.push(r); }
+  }
+  if (rects.length > FOUNDATION_MAX_RECTS) {
+    rects = [{
+      x1: Math.min(...rects.map((r) => r.x1)), z1: Math.min(...rects.map((r) => r.z1)),
+      x2: Math.max(...rects.map((r) => r.x2)), z2: Math.max(...rects.map((r) => r.z2)),
+    }];
+  }
+
+  // The build's own base material, if it is one that stands up as a wall of
+  // earth or stone; otherwise stone bricks.
+  const area = new Map();
+  for (const s of base) {
+    const b = baseOf(s.material);
+    area.set(b, (area.get(b) || 0) + (s.x2 - s.x1 + 1) * (s.z2 - s.z1 + 1));
+  }
+  const [dominant] = [...area.entries()].sort((a, b) => b[1] - a[1])[0];
+  const material = NOT_A_FOUNDATION.test(dominant) ? 'stone_bricks' : dominant;
+
+  const top = origin.y + bounds.y1 - 1;
+  const bottom = Math.max(lowGround, origin.y - maxDepth, minY);
+  if (bottom > top) return null;
+  return { bottom, top, material, rects };
+}
+
+export function foundationCommands(foundation) {
+  if (!foundation) return [];
+  const { bottom, top, material, rects } = foundation;
+  const spans = rects.map((r) => ({ ...r, y1: bottom, y2: top, material, mode: 'solid' }));
+  return spansToCommands(spans, { x: 0, y: 0, z: 0 }).map((c) => `${c} replace ${FILLABLE}`);
+}
