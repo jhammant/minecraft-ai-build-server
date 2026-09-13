@@ -75,3 +75,12 @@ export function budgetFor({ size, description, maxExtent }) {
   }
   return { footprint: cap(preset), height: cap(preset), reason: `they picked a ${size} build` };
 }
+
+// How far past the asked-for size a plan may land on the model's last attempt,
+// and never past the server's own limit. See the verify step in build.js.
+export const SIZE_GRACE = 1.2;
+
+export function withGrace(budget, maxExtent) {
+  const cap = (n) => Math.min(maxExtent, Math.ceil(n * SIZE_GRACE));
+  return { ...budget, footprint: cap(budget.footprint), height: cap(budget.height) };
+}

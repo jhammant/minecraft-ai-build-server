@@ -16,7 +16,7 @@ import { encodePNG } from './png.js';
 import { snapshot, restore, slotFor } from './undo.js';
 import { withForceload, waitLoaded, padArea } from './forceload.js';
 import { createBlockChecker } from './blocks.js';
-import { budgetFor, isSize, SIZES } from './size.js';
+import { budgetFor, isSize, SIZES, withGrace } from './size.js';
 import { interiorGaps, wantedFurniture } from './interior.js';
 
 export { ValidationError };
@@ -330,8 +330,21 @@ export function createBuilder({
       notify(`Thinking about "${description}"...`, 'info');
 
       let nudged = false;
+      let attempt = null;       // unknown until the model loop reports it
       const verify = async (plan) => {
-        const checked = validatePlan(plan, { x: 0, y: originY, z: 0 }, lim);
+        // The last attempt gets a little slack on the size the player asked for.
+        // The budget is there to stop 2x overshoots - an aquarium asked for at
+        // about 40 came out 81 wide and ran into the next build - but a farm
+        // redrawn three times at 54 against a cap of 50 ended in an error and
+        // nothing built at all. The model is still told the real budget.
+        const lastTry = Boolean(budget && attempt && attempt.n === attempt.of);
+        const limNow = lastTry ? { ...lim, budget: withGrace(budget, lim.maxExtent) } : lim;
+        const checked = validatePlan(plan, { x: 0, y: originY, z: 0 }, limNow);
+        if (lastTry && (checked.size.x > budget.footprint || checked.size.z > budget.footprint
+          || checked.size.y > budget.height)) {
+          log(`size note: "${plan.name}" is ${checked.size.x}x${checked.size.z}, over the asked-for `
+            + `${budget.footprint}x${budget.footprint}; accepted on the last attempt`);
+        }
         // The validator knows the id is well-formed; only the server knows it
         // exists. An id it doesn't recognise used to be dropped silently at
         // build time - 47 plants vanished from one aquarium - so ask first,
@@ -354,8 +367,11 @@ export function createBuilder({
         if (gaps.length) log(`interior note: "${plan.name}" still has no ${gaps.join('; ')}`);
         return checked;
       };
-      const onAttempt = (n, of) => setProgress('thinking',
-        n === 1 ? `Designing "${description}"` : `Retry ${n} of ${of} — the first plan didn't pass the safety check`, 0, 0);
+      const onAttempt = (n, of) => {
+        attempt = { n, of };
+        setProgress('thinking',
+          n === 1 ? `Designing "${description}"` : `Retry ${n} of ${of} — the first plan didn't pass the safety check`, 0, 0);
+      };
       const { plan, verified, usage, attempts, model } = await generate(
         description, env, verify,
         { onAttempt, prompt: { budget, limits: lim, wanted: wantedFurniture(description) } },
