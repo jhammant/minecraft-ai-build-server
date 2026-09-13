@@ -6,6 +6,7 @@ import { describeBackend } from './llm.js';
 import { createBuilder, ValidationError } from './build.js';
 import { createRewards } from './rewards.js';
 import { startWebServer } from './web.js';
+import { splitSizeWord } from './size.js';
 
 const env = process.env;
 const STATE_DIR = env.STATE_DIR || '/state';
@@ -88,10 +89,12 @@ async function broadcast(rcon, text, colour = 'dark_aqua') {
 
 const COLOUR = { info: 'aqua', progress: 'green', error: 'red' };
 
-async function handleBuild(rcon, player, description) {
+async function handleBuild(rcon, player, arg) {
+  // "!build small a hut" - an optional size word first.
+  const { size, description } = splitSizeWord(arg);
   try {
     const r = await builder.run({
-      rcon, player, description,
+      rcon, player, description, size,
       notify: (msg, kind) => tell(rcon, player, msg, COLOUR[kind] || 'aqua'),
     });
     await tell(rcon, player, r.summary || `Done: ${r.name}`, 'green');
@@ -158,6 +161,7 @@ async function handleHelp(rcon, player) {
   const lines = [
     ['--- AI Builder ---', 'gold'],
     ['!build <what you want>  - e.g. !build a pirate ship', 'white'],
+    ['!build small|medium|large|huge <what>  - e.g. !build small a cosy hut', 'white'],
     ['!undo                   - remove the last thing I built', 'white'],
     ...(rewards.enabled()
       ? [['!credits                - what you have earned, and what it buys', 'white']]

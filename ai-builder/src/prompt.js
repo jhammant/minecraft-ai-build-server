@@ -21,11 +21,25 @@ export const EXAMPLE_ASSISTANT = JSON.stringify({
   ops: [{"op": "cylinder", "cx": 0, "cy": 0, "cz": 0, "radius": 6, "height": 1, "material": "cobblestone"}, {"op": "cuboid", "x1": -1, "y1": 0, "z1": 6, "x2": 1, "y2": 0, "z2": 11, "material": "cobblestone"}, {"op": "cylinder", "cx": 0, "cy": 1, "cz": 0, "radius": 5, "height": 1, "material": "polished_deepslate"}, {"op": "cylinder", "cx": 0, "cy": 2, "cz": 0, "radius": 5, "height": 20, "material": "stone_bricks", "hollow": true}, {"op": "cylinder", "cx": 0, "cy": 2, "cz": 0, "radius": 4, "height": 20, "material": "air"}, {"op": "cylinder", "cx": 0, "cy": 2, "cz": 0, "radius": 4, "height": 1, "material": "spruce_planks"}, {"op": "cylinder", "cx": 0, "cy": 8, "cz": 0, "radius": 4, "height": 1, "material": "spruce_planks"}, {"op": "cylinder", "cx": 0, "cy": 14, "cz": 0, "radius": 4, "height": 1, "material": "spruce_planks"}, {"op": "cylinder", "cx": 0, "cy": 11, "cz": 0, "radius": 6, "height": 1, "material": "polished_deepslate", "hollow": true}, {"op": "cylinder", "cx": 0, "cy": 22, "cz": 0, "radius": 6, "height": 1, "material": "polished_deepslate"}, {"op": "cylinder", "cx": 0, "cy": 23, "cz": 0, "radius": 6, "height": 3, "material": "stone_bricks", "hollow": true}, {"op": "cylinder", "cx": 0, "cy": 23, "cz": 0, "radius": 5, "height": 1, "material": "smooth_stone"}, {"op": "cone", "cx": 0, "cy": 24, "cz": 0, "radius": 4, "height": 8, "material": "dark_prismarine"}, {"op": "cuboid", "x1": 0, "y1": 6, "z1": -5, "x2": 0, "y2": 7, "z2": -5, "material": "glass_pane"}, {"op": "cuboid", "x1": 5, "y1": 6, "z1": 0, "x2": 5, "y2": 7, "z2": 0, "material": "glass_pane"}, {"op": "cuboid", "x1": -5, "y1": 6, "z1": 0, "x2": -5, "y2": 7, "z2": 0, "material": "glass_pane"}, {"op": "cuboid", "x1": 0, "y1": 12, "z1": 5, "x2": 0, "y2": 13, "z2": 5, "material": "glass_pane"}, {"op": "cuboid", "x1": 0, "y1": 12, "z1": -5, "x2": 0, "y2": 13, "z2": -5, "material": "glass_pane"}, {"op": "cuboid", "x1": 5, "y1": 12, "z1": 0, "x2": 5, "y2": 13, "z2": 0, "material": "glass_pane"}, {"op": "cuboid", "x1": 4, "y1": 3, "z1": 0, "x2": 4, "y2": 23, "z2": 0, "material": "ladder[facing=west]"}, {"op": "cuboid", "x1": 2, "y1": 6, "z1": 0, "x2": 2, "y2": 6, "z2": 0, "material": "sea_lantern"}, {"op": "cuboid", "x1": -2, "y1": 12, "z1": 0, "x2": -2, "y2": 12, "z2": 0, "material": "sea_lantern"}, {"op": "cuboid", "x1": 2, "y1": 18, "z1": 0, "x2": 2, "y2": 18, "z2": 0, "material": "sea_lantern"}, {"op": "cuboid", "x1": -2, "y1": 3, "z1": 4, "x2": 2, "y2": 6, "z2": 4, "material": "chiseled_stone_bricks"}, {"op": "cuboid", "x1": -1, "y1": 3, "z1": 4, "x2": 1, "y2": 5, "z2": 5, "material": "air"}, {"op": "cuboid", "x1": -1, "y1": 24, "z1": 5, "x2": 1, "y2": 25, "z2": 6, "material": "air"}, {"op": "cuboid", "x1": -1, "y1": 24, "z1": -6, "x2": 1, "y2": 25, "z2": -5, "material": "air"}, {"op": "cuboid", "x1": 5, "y1": 24, "z1": -1, "x2": 6, "y2": 25, "z2": 1, "material": "air"}, {"op": "cuboid", "x1": -6, "y1": 24, "z1": -1, "x2": -5, "y2": 25, "z2": 1, "material": "air"}, {"op": "cuboid", "x1": 4, "y1": 24, "z1": 0, "x2": 4, "y2": 25, "z2": 0, "material": "air"}],
 });
 
-export function buildMessages(description) {
+// The request itself, with the limits that apply to THIS build. The size is
+// stated rather than left to the system prompt's generic ceiling, because the
+// model treats a ceiling as a target.
+export function requestText(description, { budget, limits } = {}) {
+  const lines = [description];
+  if (budget) {
+    lines.push(`SIZE BUDGET: the whole build must fit within ${budget.footprint} x ${budget.footprint} `
+      + `blocks across (x and z) and ${budget.height} tall. This is checked; a bigger plan is rejected.`);
+  } else if (limits?.maxExtent) {
+    lines.push(`SIZE: at most ${limits.maxExtent} blocks on any axis - most builds need far less.`);
+  }
+  return lines.join('\n\n');
+}
+
+export function buildMessages(description, options = {}) {
   return [
     { role: 'system', content: SYSTEM_PROMPT },
     { role: 'user', content: EXAMPLE_USER },
     { role: 'assistant', content: EXAMPLE_ASSISTANT },
-    { role: 'user', content: description },
+    { role: 'user', content: requestText(description, options) },
   ];
 }

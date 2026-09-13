@@ -309,6 +309,17 @@ export function validatePlan(plan, origin, limits) {
       `build too large: ${size.x}x${size.y}x${size.z} (max ${maxExtent} on any axis)`,
     );
   }
+  // The size the player asked for (see size.js). Held exactly like the server
+  // limit, so an oversize plan goes back to the model to be redrawn smaller.
+  const { budget } = limits;
+  if (budget && (size.x > budget.footprint || size.z > budget.footprint || size.y > budget.height)) {
+    throw new ValidationError(
+      `too big for the size the player asked for: ${size.x} wide x ${size.z} deep x ${size.y} tall, `
+      + `but it must fit within ${budget.footprint} x ${budget.footprint} and ${budget.height} tall `
+      + `(${budget.reason}). Scale the whole design down - smaller masses, closer together - `
+      + 'rather than cropping it.',
+    );
+  }
 
   // NB: this sums span volumes, so overlapping ops are counted more than once.
   // A detailed build therefore reads much larger than the volume it occupies -

@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { isSize } from './size.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -508,7 +509,10 @@ export function startWebServer({ env, state, saveState, builder, rewards, log, g
       }
 
       case 'POST /api/build': {
-        const { description, x, y, z, player } = await readBody(req);
+        const { description, x, y, z, player, size } = await readBody(req);
+        if (size && !isSize(size)) {
+          return json(res, 400, { error: 'Size must be small, medium, large or huge.' });
+        }
         const named = NAME_RE.test(String(player || ''));
         // With rewards on, an anonymous build would be a free one - so the
         // panel has to say whose credits are being spent.
@@ -523,6 +527,7 @@ export function startWebServer({ env, state, saveState, builder, rewards, log, g
             rcon: rcon(),
             player: who,
             description: String(description || ''),
+            size: size || undefined,
             at: Number.isFinite(x) && Number.isFinite(z) ? { x, y, z } : undefined,
             notify: (msg) => log(`[web] ${msg}`),
           });

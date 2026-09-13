@@ -14,6 +14,7 @@ import { encodePNG } from './png.js';
 import { snapshot, restore, slotFor } from './undo.js';
 import { withForceload, waitLoaded, padArea } from './forceload.js';
 import { createBlockChecker } from './blocks.js';
+import { budgetFor, isSize, SIZES } from './size.js';
 
 export { ValidationError };
 
@@ -233,8 +234,9 @@ export function createBuilder({
    * @param {string}   o.description  what to build
    * @param {object=}  o.at           explicit {x,y,z}; omit to build in front of the player
    * @param {function} o.notify       (message, kind) => void, for progress
+   * @param {string=}  o.size         small | medium | large | huge
    */
-  async function run({ rcon, player, description, at, notify = () => {} }) {
+  async function run({ rcon, player, description, at, size, notify = () => {} }) {
     if (busy) throw new Error('Someone else is building right now - try again in a moment!');
     const limited = rateLimit(player) || globalLimit();
     if (limited) throw new Error(limited);
@@ -247,9 +249,16 @@ export function createBuilder({
     const broke = rewards.check(player);
     if (broke) throw new Error(broke);
 
-    // Rank only ever narrows the server's envelope (see limitsFor), so this is
-    // safe to hand straight to the validator.
-    const lim = rewards.limitsFor(player, limits);
+    if (size && !isSize(size)) {
+      throw new Error(`"${size}" isn't a size - pick ${Object.keys(SIZES).join(', ')}.`);
+    }
+
+    // Rank only ever narrows the server's envelope (see limitsFor), and the
+    // size budget only narrows it further, so this is safe to hand straight to
+    // the validator.
+    const ranked = rewards.limitsFor(player, limits);
+    const budget = budgetFor({ size, description, maxExtent: ranked.maxExtent });
+    const lim = { ...ranked, budget };
 
     busy = true;
     const started = Date.now();
@@ -300,7 +309,7 @@ export function createBuilder({
       const onAttempt = (n, of) => setProgress('thinking',
         n === 1 ? `Designing "${description}"` : `Retry ${n} of ${of} — the first plan didn't pass the safety check`, 0, 0);
       const { plan, verified, usage, attempts, model } = await generate(
-        description, env, verify, { onAttempt },
+        description, env, verify, { onAttempt, prompt: { budget, limits: lim } },
       );
 
       // Now the plan exists, its real size is known - so a hut costs a hut and
@@ -429,7 +438,7 @@ export function createBuilder({
 
       return {
         name: plan.name, summary: plan.summary, blocks: verified.blocks,
-        size: verified.size, origin, seconds, model, attempts,
+        size: verified.size, origin, seconds, model, attempts, budget,
         undoable: Boolean(snap), usage,
         cost, spentToday: spentToday(), dailyCostLimit,
         price: bill.price || 0, band: bill.band, wallet,

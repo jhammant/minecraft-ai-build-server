@@ -115,10 +115,11 @@ async function callOnce(cfg, messages, { timeoutMs = Number(process.env.LLM_TIME
  * op, and the model fixes it readily when told exactly what failed.
  */
 export async function generateBuildPlan(description, env, verify, {
-  attempts = 3, onAttempt,
+  attempts = 3, onAttempt, prompt = {},
 } = {}) {
   const cfg = backendConfig(env);
-  const messages = buildMessages(description);
+  // `prompt` carries what applies to this request only: its size budget.
+  const messages = buildMessages(description, prompt);
   let lastErr;
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
