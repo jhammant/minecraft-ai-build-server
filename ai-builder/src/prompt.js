@@ -24,13 +24,16 @@ export const EXAMPLE_ASSISTANT = JSON.stringify({
 // The request itself, with the limits that apply to THIS build. The size is
 // stated rather than left to the system prompt's generic ceiling, because the
 // model treats a ceiling as a target.
-export function requestText(description, { budget, limits } = {}) {
+export function requestText(description, { budget, limits, wanted } = {}) {
   const lines = [description];
   if (budget) {
     lines.push(`SIZE BUDGET: the whole build must fit within ${budget.footprint} x ${budget.footprint} `
       + `blocks across (x and z) and ${budget.height} tall. This is checked; a bigger plan is rejected.`);
   } else if (limits?.maxExtent) {
     lines.push(`SIZE: at most ${limits.maxExtent} blocks on any axis - most builds need far less.`);
+  }
+  if (wanted?.length) {
+    lines.push(`MUST INCLUDE, inside: ${wanted.join(', ')}. Place them where they would really be used.`);
   }
   return lines.join('\n\n');
 }

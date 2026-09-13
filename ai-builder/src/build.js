@@ -8,13 +8,14 @@
 import fs from 'node:fs';
 import { generateBuildPlan } from './llm.js';
 import { validatePlan, ValidationError, WORLD_MIN_Y, WORLD_MAX_Y } from './validate.js';
-import { spansToCommands } from './compile.js';
+import { spansToCommands, detailCommands } from './compile.js';
 import { renderIso } from './render-iso.js';
 import { encodePNG } from './png.js';
 import { snapshot, restore, slotFor } from './undo.js';
 import { withForceload, waitLoaded, padArea } from './forceload.js';
 import { createBlockChecker } from './blocks.js';
 import { budgetFor, isSize, SIZES } from './size.js';
+import { interiorGaps, wantedFurniture } from './interior.js';
 
 export { ValidationError };
 
@@ -290,6 +291,7 @@ export function createBuilder({
       setProgress('thinking', `Designing "${description}"`, 0, 0);
       notify(`Thinking about "${description}"...`, 'info');
 
+      let nudged = false;
       const verify = async (plan) => {
         const checked = validatePlan(plan, { x: 0, y: originY, z: 0 }, lim);
         // The validator knows the id is well-formed; only the server knows it
@@ -304,12 +306,21 @@ export function createBuilder({
             + 'Use exact current ids, e.g. seagrass, dirt_path, short_grass, oak_planks.',
           );
         }
+        // Once, and only once: a house with no door, or a bedroom with no bed.
+        const gaps = interiorGaps(description, checked);
+        if (gaps.length && !nudged) {
+          nudged = true;
+          throw new ValidationError(`nearly there, but the plan is missing ${gaps.join('; ')}. `
+            + 'Add them (keep everything else as it is).');
+        }
+        if (gaps.length) log(`interior note: "${plan.name}" still has no ${gaps.join('; ')}`);
         return checked;
       };
       const onAttempt = (n, of) => setProgress('thinking',
         n === 1 ? `Designing "${description}"` : `Retry ${n} of ${of} — the first plan didn't pass the safety check`, 0, 0);
       const { plan, verified, usage, attempts, model } = await generate(
-        description, env, verify, { onAttempt, prompt: { budget, limits: lim } },
+        description, env, verify,
+        { onAttempt, prompt: { budget, limits: lim, wanted: wantedFurniture(description) } },
       );
 
       // Now the plan exists, its real size is known - so a hut costs a hut and
@@ -358,7 +369,12 @@ export function createBuilder({
         }
         const origin = { x: ox, y, z: oz };
 
-        const commands = spansToCommands(verified.spans, origin);
+        // Structure first, then the details pass: doors, beds and everything
+        // that needs a wall or floor to exist before it can stay put.
+        const commands = [
+          ...spansToCommands(verified.spans, origin),
+          ...detailCommands(verified.details, origin),
+        ];
         log(`build "${plan.name}" for ${player} at ${origin.x},${origin.y},${origin.z}: `
           + `${verified.blocks} blocks, ${commands.length} commands, ${attempts} attempt(s), ${model}`);
 
@@ -393,7 +409,7 @@ export function createBuilder({
         let done = 0;
         for (const cmd of commands) {
           const res = await rcon.send(cmd);
-          if (/^(Failed|Unknown|Incorrect|That position)/i.test(res.trim())) {
+          if (/^(Failed|Unknown|Incorrect|That position|Could not)/i.test(res.trim())) {
             log(`command rejected: ${cmd} -> ${res.trim().slice(0, 120)}`);
           }
           if (++done % 40 === 0) {
@@ -426,7 +442,8 @@ export function createBuilder({
         { player, name: plan.name, summary: plan.summary, description,
           origin, blocks: verified.blocks, seconds, at: builtAt,
           ops: plan.ops.length, commands: commands.length, model,
-          shot: saveShot(`${env.STATE_DIR || '/state'}/shots`, builtAt, verified.spans, log),
+          shot: saveShot(`${env.STATE_DIR || '/state'}/shots`, builtAt, verified.preview, log),
+          doors: verified.details.doors.length, beds: verified.details.beds.length,
           size: verified.size, cost, materials: topMaterials(verified.spans),
           price: bill.price || 0, band: bill.band,
           // Kept so a build can be located (and cleared) even if its undo

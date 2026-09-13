@@ -195,3 +195,52 @@ export function createBlockChecker({ log = () => {} } = {}) {
 
   return { unknown };
 }
+
+// --- blocks that can't be placed by a plain fill ---------------------------------
+
+export const baseOf = (material) => String(material).split('[')[0].replace(/^minecraft:/, '');
+
+/** Blockstates of a material as an object: "oak_door[facing=north]" -> {facing:'north'} */
+export function statesOf(material) {
+  const m = String(material).match(/\[(.*)\]$/);
+  if (!m) return {};
+  return Object.fromEntries(m[1].split(',').map((kv) => kv.split('=')).filter((kv) => kv.length === 2));
+}
+
+// Two blocks tall or two blocks long, and each half dies without the other. A
+// fill puts down one half and nothing else.
+export const isDoor = (base) => /_door$/.test(base);
+export const isBed = (base) => /_bed$/.test(base);
+const DOUBLE_PLANTS = new Set(['sunflower', 'lilac', 'rose_bush', 'peony', 'tall_grass', 'large_fern',
+  'tall_seagrass', 'pitcher_plant', 'small_dripleaf']);
+export const isDoublePlant = (base) => DOUBLE_PLANTS.has(base);
+
+// Blocks that hang off, stand on, or grow out of another block, and pop off
+// (or never stick) if placed before that block exists. A fill runs in the
+// model's op order, which puts the torch up before the wall it hangs on.
+const FRAGILE = new Set([
+  'torch', 'wall_torch', 'lantern', 'ladder', 'vine', 'glow_lichen', 'sculk_vein', 'resin_clump',
+  'lever', 'tripwire_hook', 'tripwire', 'redstone_wire', 'repeater', 'comparator', 'flower_pot',
+  'rail', 'candle', 'bell', 'snow', 'cocoa', 'nether_wart', 'frogspawn',
+  'seagrass', 'kelp', 'kelp_plant', 'sea_pickle', 'lily_pad', 'sugar_cane', 'cactus', 'bamboo',
+  'short_grass', 'fern', 'dead_bush', 'bush', 'firefly_bush', 'short_dry_grass', 'tall_dry_grass',
+  'dandelion', 'poppy', 'blue_orchid', 'allium', 'azure_bluet', 'oxeye_daisy', 'cornflower',
+  'lily_of_the_valley', 'wither_rose', 'torchflower', 'open_eyeblossom', 'closed_eyeblossom',
+  'sweet_berry_bush', 'brown_mushroom', 'red_mushroom', 'crimson_fungus', 'warped_fungus',
+  'crimson_roots', 'warped_roots', 'nether_sprouts', 'pink_petals', 'wildflowers', 'leaf_litter',
+  'cactus_flower', 'mangrove_propagule', 'wheat', 'carrots', 'potatoes', 'beetroots',
+  'melon_stem', 'pumpkin_stem', 'pointed_dripstone', 'amethyst_cluster', 'hanging_roots',
+  'spore_blossom', 'cave_vines', 'cave_vines_plant', 'weeping_vines', 'weeping_vines_plant',
+  'twisting_vines', 'twisting_vines_plant', 'big_dripleaf', 'big_dripleaf_stem',
+  'pale_hanging_moss', 'fire', 'soul_fire',
+]);
+const FRAGILE_SUFFIXES = ['_torch', '_button', '_sign', '_carpet', '_banner', '_pressure_plate',
+  '_candle', '_coral', '_coral_fan', '_coral_wall_fan', '_sapling', '_tulip', '_amethyst_bud',
+  '_rail', '_lantern'];
+const STURDY_LANTERNS = new Set(['sea_lantern', 'jack_o_lantern']);
+
+export function isFragile(base) {
+  if (FRAGILE.has(base) || DOUBLE_PLANTS.has(base) || base.startsWith('potted_')) return true;
+  if (STURDY_LANTERNS.has(base)) return false;
+  return FRAGILE_SUFFIXES.some((s) => base.endsWith(s));
+}

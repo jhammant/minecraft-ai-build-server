@@ -9,6 +9,9 @@
 // apply to what will actually be executed, so a cleverly-worded op can't
 // under-report its size.
 
+import { splitDetails, STEP } from './details.js';
+import { baseOf, isDoublePlant, statesOf } from './blocks.js';
+
 // A span is an inclusive axis-aligned box: {x1,y1,z1,x2,y2,z2,material,mode}
 const span = (x1, y1, z1, x2, y2, z2, material, mode = 'solid') => ({
   x1: Math.min(x1, x2), y1: Math.min(y1, y2), z1: Math.min(z1, z2),
@@ -383,6 +386,12 @@ function opToSpans(op) {
       break;
     }
 
+    // Placed in the details pass, not as geometry: see compilePlan.
+    case 'door':
+    case 'bed':
+    case 'creatures':
+      break;
+
     default:
       throw new Error(`unknown op: ${op.op}`);
   }
@@ -394,6 +403,26 @@ export function planToSpans(plan) {
   const spans = [];
   for (const op of plan.ops) spans.push(...opToSpans(op));
   return spans;
+}
+
+/**
+ * The whole plan, split into what fill places and what the details pass places.
+ * Validate this, not planToSpans: the details are real blocks too.
+ */
+export function compilePlan(plan) {
+  const raw = [];
+  const doors = [];
+  const beds = [];
+  for (const op of plan.ops) {
+    if (op.op === 'door') {
+      doors.push({ x: op.x, y: op.y, z: op.z, material: op.material, facing: op.facing, hinge: op.hinge });
+    } else if (op.op === 'bed') {
+      beds.push({ x: op.x, y: op.y, z: op.z, material: op.material, facing: op.facing });
+    } else {
+      raw.push(...opToSpans(op));
+    }
+  }
+  return splitDetails(raw, { doors, beds });
 }
 
 // Bounding box over all spans, in local coordinates.
@@ -503,4 +532,56 @@ export function siteFillCommands(region, ground, material) {
     spans.push({ ...base, y1: Math.max(ground + 1, region.y1), y2: region.y2, material: 'air' });
   }
   return spansToCommands(spans, { x: 0, y: 0, z: 0 });
+}
+
+// Tall plants are two blocks like a door, and need the same two-step placement.
+// Capped: a meadow of sunflowers is two commands per flower.
+const MAX_DOUBLE_PLANTS = 128;
+
+/**
+ * The details pass, as commands. Runs after every structure command, so the
+ * wall a torch hangs on and the floor a bed stands on already exist.
+ *
+ * Two-block things go down in two setblocks, lower (or foot) first. The first
+ * half is placed `strict` - as-is, with no shape update - because on its own it
+ * is an invalid half and an update would remove it. The second half is placed
+ * normally, so the pair settles against its neighbours. Every value here comes
+ * from the validated plan: coordinates are integers, ids passed the block
+ * checks, facing and hinge are from fixed lists.
+ */
+export function detailCommands({ doors = [], beds = [], blocks = [] }, origin) {
+  const at = (x, y, z) => `${x + origin.x} ${y + origin.y} ${z + origin.z}`;
+  const cmds = [];
+  for (const d of doors) {
+    const states = `facing=${d.facing},hinge=${d.hinge}`;
+    // Clear the opening first, so a door that fails to place still leaves a
+    // way in rather than a wall.
+    cmds.push(`fill ${at(d.x, d.y, d.z)} ${at(d.x, d.y + 1, d.z)} air`);
+    cmds.push(`setblock ${at(d.x, d.y, d.z)} ${d.material}[${states},half=lower] strict`);
+    cmds.push(`setblock ${at(d.x, d.y + 1, d.z)} ${d.material}[${states},half=upper]`);
+  }
+  for (const b of beds) {
+    const [dx, dz] = STEP[b.facing];
+    cmds.push(`setblock ${at(b.x, b.y, b.z)} ${b.material}[facing=${b.facing},part=foot] strict`);
+    cmds.push(`setblock ${at(b.x + dx, b.y, b.z + dz)} ${b.material}[facing=${b.facing},part=head]`);
+  }
+  let plants = 0;
+  for (const s of blocks) {
+    const base = baseOf(s.material);
+    if (isDoublePlant(base)) {
+      // An upper half drawn on its own is placed by the lower half below it.
+      if (statesOf(s.material).half === 'upper') continue;
+      for (let z = s.z1; z <= s.z2; z++) {
+        for (let x = s.x1; x <= s.x2; x++) {
+          if (plants++ >= MAX_DOUBLE_PLANTS) continue;
+          cmds.push(`setblock ${at(x, s.y1, z)} ${base}[half=lower] strict`);
+          cmds.push(`setblock ${at(x, s.y1 + 1, z)} ${base}[half=upper]`);
+        }
+      }
+      continue;
+    }
+    if (spanVolume(s) === 1) cmds.push(`setblock ${at(s.x1, s.y1, s.z1)} ${s.material}`);
+    else cmds.push(...spansToCommands([{ ...s, mode: 'solid' }], origin));
+  }
+  return cmds;
 }

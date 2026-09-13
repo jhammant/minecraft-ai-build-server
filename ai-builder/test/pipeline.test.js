@@ -14,6 +14,7 @@ const hut = {
   summary: 'A hut.',
   ops: [
     { op: 'cuboid', x1: -3, y1: 0, z1: -3, x2: 3, y2: 4, z2: 3, material: 'oak_planks', hollow: true },
+    { op: 'door', x: 0, y: 1, z: 3, facing: 'north', material: 'spruce_door' },
   ],
 };
 

@@ -6,8 +6,9 @@
 // An LLM that hallucinates, or a prompt-injected one, can at worst produce a
 // plan that gets rejected.
 
-import { planToSpans, spansBounds, totalBlocks } from './compile.js';
-import { normaliseMaterial, notABlock } from './blocks.js';
+import { compilePlan, spansBounds, totalBlocks } from './compile.js';
+import { normaliseMaterial, notABlock, baseOf, isDoor, isBed, COLOURS } from './blocks.js';
+import { detailBoxes, FACINGS, HINGES } from './details.js';
 
 // Minecraft world height limits (1.18+ / 26.x).
 export const WORLD_MIN_Y = -64;
@@ -46,7 +47,15 @@ const HAZARD_BLOCKS = new Set([
 ]);
 
 const VALID_OPS = new Set(['layer', 'cuboid', 'cylinder', 'sphere', 'cone', 'pyramid',
-  'crenellate', 'roof', 'repeat', 'stairs']);
+  'crenellate', 'roof', 'repeat', 'stairs', 'door', 'bed']);
+
+// Ops that place something in the details pass rather than draw geometry, so
+// they have nothing for repeat to stretch.
+const DETAIL_OPS = new Set(['door', 'bed']);
+
+// More than a village's worth is not a house, it's a runaway loop.
+export const MAX_DOORS = 64;
+export const MAX_BEDS = 64;
 
 // Per-op required numeric fields.
 const OP_FIELDS = {
@@ -60,6 +69,8 @@ const OP_FIELDS = {
   repeat: ['count'],
   layer: ['x', 'y', 'z'],
   stairs: ['x', 'y', 'z', 'steps'],
+  door: ['x', 'y', 'z'],
+  bed: ['x', 'y', 'z'],
 };
 
 // repeat carries a child op, so validation has to recurse rather than just
@@ -80,6 +91,9 @@ function checkOp(op, limits, allowHazards, depth = 0) {
       throw new ValidationError(`repeat.count must be 1..64, got ${op.count}`);
     }
     if (n1 * n2 > 128) throw new ValidationError('repeat expands too far (count*count2 > 128)');
+    if (DETAIL_OPS.has(op.child?.op)) {
+      throw new ValidationError(`repeat can't contain a ${op.child.op} - use one ${op.child.op} op each`);
+    }
     return checkOp(op.child, limits, allowHazards, depth + 1);
   }
   if (op.op === 'layer') {
@@ -109,6 +123,8 @@ function checkOp(op, limits, allowHazards, depth = 0) {
     for (const f of OP_FIELDS.layer) checkNumber(op, f, limits);
     return true;
   }
+  if (op.op === 'door') return checkDoor(op, limits, allowHazards);
+  if (op.op === 'bed') return checkBed(op, limits, allowHazards);
   op.material = checkMaterial(op.material, allowHazards);
   if (op.axis !== undefined && !['x', 'y', 'z'].includes(op.axis)) {
     throw new ValidationError(`bad axis: ${JSON.stringify(op.axis)}`);
@@ -130,6 +146,41 @@ function checkOp(op, limits, allowHazards, depth = 0) {
 }
 
 export class ValidationError extends Error {}
+
+// A door is placed by the compiler from these fields alone - two setblocks with
+// states it writes itself - so each field is held to a fixed shape here.
+function checkDoor(op, limits, allowHazards) {
+  for (const f of OP_FIELDS.door) checkNumber(op, f, limits);
+  const material = checkMaterial(op.material ?? 'oak_door', allowHazards);
+  if (!isDoor(baseOf(material))) {
+    throw new ValidationError(`door.material must be a door, e.g. oak_door or spruce_door - got ${JSON.stringify(op.material)}`);
+  }
+  op.material = baseOf(material);
+  if (op.facing !== undefined && !FACINGS.includes(op.facing)) {
+    throw new ValidationError(`door.facing must be north|south|east|west, got ${JSON.stringify(op.facing)}`);
+  }
+  if (op.hinge !== undefined && !HINGES.includes(op.hinge)) {
+    throw new ValidationError(`door.hinge must be left|right, got ${JSON.stringify(op.hinge)}`);
+  }
+  return true;
+}
+
+function checkBed(op, limits, allowHazards) {
+  for (const f of OP_FIELDS.bed) checkNumber(op, f, limits);
+  const color = op.color ?? op.colour;
+  if (color !== undefined && !COLOURS.includes(color)) {
+    throw new ValidationError(`bed.color must be a dye colour like red or blue, got ${JSON.stringify(color)}`);
+  }
+  const material = checkMaterial(op.material ?? `${color || 'red'}_bed`, allowHazards);
+  if (!isBed(baseOf(material))) {
+    throw new ValidationError(`bed.material must be a bed, e.g. red_bed - got ${JSON.stringify(op.material)}`);
+  }
+  op.material = baseOf(material);
+  if (op.facing !== undefined && !FACINGS.includes(op.facing)) {
+    throw new ValidationError(`bed.facing must be north|south|east|west, got ${JSON.stringify(op.facing)}`);
+  }
+  return true;
+}
 
 // Rough lightness (0 dark .. 9 light) for the blocks builds actually use.
 // Only needs to be good enough to catch "black roof on black wall", which is
@@ -294,11 +345,16 @@ export function validatePlan(plan, origin, limits) {
 
   for (const op of plan.ops) checkOp(op, limits, allowHazards);
 
-  // From here on we validate the REAL geometry, so an op can't understate its size.
-  const spans = planToSpans(plan);
-  if (spans.length === 0) throw new ValidationError('plan compiles to nothing');
+  // From here on we validate the REAL geometry, so an op can't understate its
+  // size. Details count: a door is two real blocks, a bed is two more.
+  const compiled = compilePlan(plan);
+  const { spans, doors, beds, blocks: fragile } = compiled;
+  const boxes = [...spans, ...detailBoxes(compiled)];
+  if (boxes.length === 0) throw new ValidationError('plan compiles to nothing');
+  if (doors.length > MAX_DOORS) throw new ValidationError(`too many doors: ${doors.length} (max ${MAX_DOORS})`);
+  if (beds.length > MAX_BEDS) throw new ValidationError(`too many beds: ${beds.length} (max ${MAX_BEDS})`);
 
-  const bounds = spansBounds(spans);
+  const bounds = spansBounds(boxes);
   const size = {
     x: bounds.x2 - bounds.x1 + 1,
     y: bounds.y2 - bounds.y1 + 1,
@@ -324,7 +380,7 @@ export function validatePlan(plan, origin, limits) {
   // NB: this sums span volumes, so overlapping ops are counted more than once.
   // A detailed build therefore reads much larger than the volume it occupies -
   // the ceiling is deliberately generous to allow for that.
-  const blocks = totalBlocks(spans);
+  const blocks = totalBlocks(boxes);
   if (blocks > maxBlocks) {
     throw new ValidationError(`build too heavy: ${blocks} blocks (max ${maxBlocks})`);
   }
@@ -348,7 +404,11 @@ export function validatePlan(plan, origin, limits) {
 
   // Every distinct block the build will place, so the caller can have the
   // server confirm each one exists before anything is built.
-  const materials = [...new Set(spans.map((s) => s.material))].filter((m) => m !== 'air');
+  const materials = [...new Set(boxes.map((s) => s.material))].filter((m) => m !== 'air');
 
-  return { spans, bounds, size, blocks, materials };
+  return {
+    spans, details: { doors, beds, blocks: fragile }, bounds, size, blocks, materials,
+    // Structure and details together, for drawing the build.
+    preview: boxes,
+  };
 }
