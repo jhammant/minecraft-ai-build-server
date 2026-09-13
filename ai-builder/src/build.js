@@ -13,6 +13,7 @@ import { renderIso } from './render-iso.js';
 import { encodePNG } from './png.js';
 import { snapshot, restore, slotFor } from './undo.js';
 import { withForceload, waitLoaded, padArea } from './forceload.js';
+import { createBlockChecker } from './blocks.js';
 
 export { ValidationError };
 
@@ -167,6 +168,7 @@ export function createBuilder({
   generate = generateBuildPlan,
 }) {
   let busy = false;
+  const blockChecker = createBlockChecker({ log });
   // A single "Thinking..." then silence for four minutes reads as a hang. Track
   // what the build is actually doing so the panel can show it.
   let progress = null;
@@ -279,7 +281,22 @@ export function createBuilder({
       setProgress('thinking', `Designing "${description}"`, 0, 0);
       notify(`Thinking about "${description}"...`, 'info');
 
-      const verify = (plan) => validatePlan(plan, { x: 0, y: originY, z: 0 }, lim);
+      const verify = async (plan) => {
+        const checked = validatePlan(plan, { x: 0, y: originY, z: 0 }, lim);
+        // The validator knows the id is well-formed; only the server knows it
+        // exists. An id it doesn't recognise used to be dropped silently at
+        // build time - 47 plants vanished from one aquarium - so ask first,
+        // and send the answer back to the model like any other rejection.
+        const unknown = await blockChecker.unknown(rcon, checked.materials);
+        if (unknown.length) {
+          throw new ValidationError(
+            `these are not block ids in Minecraft Java 26.1 and would not be placed: `
+            + `${unknown.map((u) => `${u.material} (${u.reason})`).join('; ')}. `
+            + 'Use exact current ids, e.g. seagrass, dirt_path, short_grass, oak_planks.',
+          );
+        }
+        return checked;
+      };
       const onAttempt = (n, of) => setProgress('thinking',
         n === 1 ? `Designing "${description}"` : `Retry ${n} of ${of} — the first plan didn't pass the safety check`, 0, 0);
       const { plan, verified, usage, attempts, model } = await generate(

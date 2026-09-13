@@ -127,7 +127,8 @@ export async function generateBuildPlan(description, env, verify, {
     try {
       const result = await callOnce(cfg, messages);
       plan = result.plan;
-      const verified = verify(plan);
+      // May be async: the builder asks the server to confirm block ids.
+      const verified = await verify(plan);
       return { plan, verified, usage: result.usage, attempts: attempt, model: cfg.model };
     } catch (err) {
       lastErr = err;

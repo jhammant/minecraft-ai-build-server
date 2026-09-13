@@ -7,6 +7,7 @@
 // plan that gets rejected.
 
 import { planToSpans, spansBounds, totalBlocks } from './compile.js';
+import { normaliseMaterial, notABlock } from './blocks.js';
 
 // Minecraft world height limits (1.18+ / 26.x).
 export const WORLD_MIN_Y = -64;
@@ -95,7 +96,7 @@ function checkOp(op, limits, allowHazards, depth = 0) {
         + `e.g. {"#":"stone_bricks",".":"air"} - got ${JSON.stringify(legend)?.slice(0, 80)}`,
       );
     }
-    for (const mat of Object.values(legend)) checkMaterial(mat, allowHazards);
+    for (const [ch, mat] of Object.entries(legend)) legend[ch] = checkMaterial(mat, allowHazards);
     if (!Array.isArray(rows) || rows.length === 0) {
       throw new ValidationError('layer needs "rows": an array of equal-length strings');
     }
@@ -108,7 +109,7 @@ function checkOp(op, limits, allowHazards, depth = 0) {
     for (const f of OP_FIELDS.layer) checkNumber(op, f, limits);
     return true;
   }
-  checkMaterial(op.material, allowHazards);
+  op.material = checkMaterial(op.material, allowHazards);
   if (op.axis !== undefined && !['x', 'y', 'z'].includes(op.axis)) {
     throw new ValidationError(`bad axis: ${JSON.stringify(op.axis)}`);
   }
@@ -232,19 +233,27 @@ export function paletteNote(spans) {
   return null;
 }
 
-function checkMaterial(material, allowHazards) {
+// Returns the material as it should be placed: a renamed id is corrected here
+// (sea_grass -> seagrass), and callers write the result back into the plan so
+// the compiler places the corrected block. Correction happens FIRST, so every
+// check below judges the id that will actually be sent.
+function checkMaterial(raw, allowHazards) {
+  const material = normaliseMaterial(raw);
   if (typeof material !== 'string' || !MATERIAL_RE.test(material)) {
-    throw new ValidationError(`bad material format: ${JSON.stringify(material)}`);
+    throw new ValidationError(`bad material format: ${JSON.stringify(raw)}`);
   }
-  const base = material.split('[')[0].replace(/^minecraft:/, '');
+  const base = material.split('[')[0];
   if (NEVER_BLOCKS.has(base)) {
     throw new ValidationError(`block not allowed: ${base}`);
   }
+  const item = notABlock(base);
+  if (item) throw new ValidationError(item);
   if (!allowHazards && HAZARD_BLOCKS.has(base)) {
     throw new ValidationError(
       `${base} is switched off on this server (set ALLOW_HAZARD_BLOCKS=true to allow it)`,
     );
   }
+  return material;
 }
 
 export { NEVER_BLOCKS, HAZARD_BLOCKS };
@@ -326,5 +335,9 @@ export function validatePlan(plan, origin, limits) {
     );
   }
 
-  return { spans, bounds, size, blocks };
+  // Every distinct block the build will place, so the caller can have the
+  // server confirm each one exists before anything is built.
+  const materials = [...new Set(spans.map((s) => s.material))].filter((m) => m !== 'air');
+
+  return { spans, bounds, size, blocks, materials };
 }
