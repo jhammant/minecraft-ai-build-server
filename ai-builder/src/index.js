@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { Rcon } from './rcon.js';
+import { Rcon, createRconLink } from './rcon.js';
+import { forceloader } from './forceload.js';
 import { describeBackend } from './llm.js';
 import { createBuilder, ValidationError } from './build.js';
 import { createRewards } from './rewards.js';
@@ -68,13 +69,18 @@ const builder = createBuilder({ env, limits: LIMITS, state, saveState, log, rewa
 
 const esc = (s) => String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
+// Chat lines are capped well under the RCON request limit (see rcon.js): an
+// over-long error message would otherwise be refused, and the player told
+// nothing at all.
+const chatText = (s) => esc(String(s).slice(0, 400));
+
 async function tell(rcon, player, text, colour = 'aqua') {
-  await rcon.send(`tellraw ${player} {"text":"${esc(text)}","color":"${colour}"}`)
+  await rcon.send(`tellraw ${player} {"text":"${chatText(text)}","color":"${colour}"}`)
     .catch((e) => log('tellraw failed:', e.message));
 }
 
 async function broadcast(rcon, text, colour = 'dark_aqua') {
-  await rcon.send(`tellraw @a {"text":"${esc(text)}","color":"${colour}"}`)
+  await rcon.send(`tellraw @a {"text":"${chatText(text)}","color":"${colour}"}`)
     .catch((e) => log('broadcast failed:', e.message));
 }
 
@@ -221,25 +227,6 @@ function tailLog(filePath, onLine) {
 
 // --- main --------------------------------------------------------------------
 
-async function connectWithRetry() {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const rcon = new Rcon({
-        host: env.RCON_HOST || 'mc',
-        port: Number(env.RCON_PORT || 25575),
-        password: env.RCON_PASSWORD,
-      });
-      await rcon.connect();
-      log('RCON connected');
-      return rcon;
-    } catch (err) {
-      const wait = Math.min(30000, attempt * 3000);
-      log(`RCON connect failed (${err.message}), retrying in ${wait / 1000}s`);
-      await new Promise((r) => setTimeout(r, wait));
-    }
-  }
-}
-
 async function main() {
   log('AI builder starting');
   let backend;
@@ -247,12 +234,29 @@ async function main() {
   log(`LLM backend: ${backend}`);
   log(`limits: ${LIMITS.maxBlocks} blocks, ${LIMITS.maxExtent} max extent`);
 
-  let rcon = await connectWithRetry();
+  // One self-healing link for the whole process. Every caller - chat, the
+  // panel, a build in flight, the rewards sweep - sends through it, so a
+  // reconnect is seen by all of them at once instead of only by whoever
+  // happened to notice the drop.
+  const rcon = createRconLink({
+    open: () => new Rcon({
+      host: env.RCON_HOST || 'mc',
+      port: Number(env.RCON_PORT || 25575),
+      password: env.RCON_PASSWORD,
+      onClose: (err) => log(`RCON connection lost: ${err.message}`),
+    }).connect(),
+    log,
+  });
+  await rcon.ensure(Infinity);
 
+  // Keepalive: notices a dead connection between builds (the link reconnects
+  // on the spot), and retries any chunk release that failed while it was down.
   setInterval(async () => {
-    try { await rcon.send('list'); } catch {
-      log('RCON lost, reconnecting');
-      rcon = await connectWithRetry();
+    try {
+      await rcon.send('list');
+      await forceloader.flush(rcon);
+    } catch (e) {
+      log(`RCON keepalive failed: ${e.message}`);
     }
   }, 30000);
 

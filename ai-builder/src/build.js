@@ -12,6 +12,7 @@ import { spansToCommands } from './compile.js';
 import { renderIso } from './render-iso.js';
 import { encodePNG } from './png.js';
 import { snapshot, restore, slotFor } from './undo.js';
+import { withForceload, waitLoaded, padArea } from './forceload.js';
 
 export { ValidationError };
 
@@ -36,6 +37,11 @@ const forwardVector = (yaw) => {
   const rad = (yaw * Math.PI) / 180;
   return { x: -Math.sin(rad), z: Math.cos(rad) };
 };
+
+// How far ahead of the player to put a build so it clears their own body.
+const reachFor = (bounds) => 4 + Math.max(
+  Math.abs(bounds.x1), Math.abs(bounds.x2), Math.abs(bounds.z1), Math.abs(bounds.z2),
+);
 
 // There's no "give me the terrain height" command, so find the highest solid
 // block by binary search and build on top of it.
@@ -154,7 +160,12 @@ const NO_REWARDS = {
   limitsFor: (_player, base) => base,
 };
 
-export function createBuilder({ env, limits, state, saveState, log, rewards = NO_REWARDS }) {
+export function createBuilder({
+  env, limits, state, saveState, log, rewards = NO_REWARDS,
+  // Injectable so the placement pipeline can be tested without paying for a
+  // model call.
+  generate = generateBuildPlan,
+}) {
   let busy = false;
   // A single "Thinking..." then silence for four minutes reads as a hang. Track
   // what the build is actually doing so the panel can show it.
@@ -246,14 +257,18 @@ export function createBuilder({ env, limits, state, saveState, log, rewards = NO
       let originY;
       let placement;
       if (at && Number.isFinite(at.x) && Number.isFinite(at.z)) {
-        // Load the area BEFORE probing it. In an unloaded chunk every
-        // `execute if block` fails, which reads as "solid" and sends the
-        // surface search to the world ceiling.
-        const p = lim.maxExtent;
-        await rcon.send(`forceload add ${at.x - p} ${at.z - p} ${at.x + p} ${at.z + p}`).catch(() => {});
-        await new Promise((r) => setTimeout(r, 1200));
-        originY = Number.isFinite(at.y) ? Math.floor(at.y) : await findSurfaceY(rcon, at.x, at.z);
         placement = { mode: 'at', x: Math.round(at.x), z: Math.round(at.z) };
+        // Load the spot BEFORE probing it. In an unloaded chunk every
+        // `execute if block` fails, which reads as "solid" and sends the
+        // surface search to the world ceiling. Released straight after: the
+        // model is about to think for minutes, and nothing needs these chunks
+        // ticking while it does.
+        originY = Number.isFinite(at.y) ? Math.floor(at.y)
+          : await withForceload(rcon, [padArea({ x1: placement.x, z1: placement.z,
+            x2: placement.x, z2: placement.z }, 16)], async () => {
+            await waitLoaded(rcon, [{ x: placement.x, y: 0, z: placement.z }], 20000);
+            return findSurfaceY(rcon, placement.x, placement.z);
+          });
       } else {
         const pos = await getPlayerPos(rcon, player);
         const yaw = await getPlayerYaw(rcon, player);
@@ -267,7 +282,7 @@ export function createBuilder({ env, limits, state, saveState, log, rewards = NO
       const verify = (plan) => validatePlan(plan, { x: 0, y: originY, z: 0 }, lim);
       const onAttempt = (n, of) => setProgress('thinking',
         n === 1 ? `Designing "${description}"` : `Retry ${n} of ${of} — the first plan didn't pass the safety check`, 0, 0);
-      const { plan, verified, usage, attempts, model } = await generateBuildPlan(
+      const { plan, verified, usage, attempts, model } = await generate(
         description, env, verify, { onAttempt },
       );
 
@@ -279,88 +294,90 @@ export function createBuilder({ env, limits, state, saveState, log, rewards = NO
           + `- you have ${bill.credits}. Ask for something smaller, or go and build a bit more!`);
       }
 
-      let origin;
-      if (placement.mode === 'at') {
-        // Now the footprint is known, re-check the ground across it rather than
-        // trusting the single probe taken before the plan existed.
+      // Where the build goes across x/z is known now; only its height may still
+      // need the ground probed. Everything from here to the last block placed
+      // runs with the site force-loaded, and the chunks are released however it
+      // ends - a failure used to leave hundreds of them loaded for good.
+      const ox = placement.mode === 'at' ? placement.x : Math.round(placement.pos.x
+        + forwardVector(placement.yaw).x * reachFor(verified.bounds));
+      const oz = placement.mode === 'at' ? placement.z : Math.round(placement.pos.z
+        + forwardVector(placement.yaw).z * reachFor(verified.bounds));
+      const site = {
+        x1: verified.bounds.x1 + ox, z1: verified.bounds.z1 + oz,
+        x2: verified.bounds.x2 + ox, z2: verified.bounds.z2 + oz,
+      };
+
+      // The ground probe samples a square centred on the origin, which can reach
+      // past a lopsided footprint - so keep that loaded too.
+      const probe = {
+        x1: ox - Math.ceil(verified.size.x / 2), z1: oz - Math.ceil(verified.size.z / 2),
+        x2: ox + Math.ceil(verified.size.x / 2), z2: oz + Math.ceil(verified.size.z / 2),
+      };
+
+      const placed = await withForceload(rcon, [padArea(site, 16), padArea(probe, 16)], async () => {
+        await waitLoaded(rcon, [{ x: site.x1, y: 0, z: site.z1 }, { x: site.x2, y: 0, z: site.z2 }], 30000);
+
         let y = originY;
-        if (!Number.isFinite(at?.y)) {
+        if (placement.mode === 'at' && !Number.isFinite(at?.y)) {
+          // Now the footprint is known, re-check the ground across it rather
+          // than trusting the single probe taken before the plan existed.
           const halfX = Math.ceil(verified.size.x / 2);
           const halfZ = Math.ceil(verified.size.z / 2);
-          const ground = await footprintSurfaceY(rcon, placement.x, placement.z, halfX, halfZ);
+          const ground = await footprintSurfaceY(rcon, ox, oz, halfX, halfZ);
           if (Number.isFinite(ground)
               && ground + verified.bounds.y2 <= WORLD_MAX_Y
               && ground + verified.bounds.y1 >= WORLD_MIN_Y) {
             y = ground;
           }
         }
-        origin = { x: placement.x, y, z: placement.z };
-      } else {
-        // Push the build clear of the player's own body.
-        const fwd = forwardVector(placement.yaw);
-        const reach = 4 + Math.max(
-          Math.abs(verified.bounds.x1), Math.abs(verified.bounds.x2),
-          Math.abs(verified.bounds.z1), Math.abs(verified.bounds.z2),
-        );
-        origin = {
-          x: Math.round(placement.pos.x + fwd.x * reach),
-          y: originY,
-          z: Math.round(placement.pos.z + fwd.z * reach),
+        const origin = { x: ox, y, z: oz };
+
+        const commands = spansToCommands(verified.spans, origin);
+        log(`build "${plan.name}" for ${player} at ${origin.x},${origin.y},${origin.z}: `
+          + `${verified.blocks} blocks, ${commands.length} commands, ${attempts} attempt(s), ${model}`);
+
+        setProgress('placing', `Building "${plan.name}"`, 0, commands.length);
+        notify(`Building "${plan.name}" - ${verified.blocks} blocks...`, 'progress');
+
+        const region = {
+          x1: verified.bounds.x1 + origin.x, y1: verified.bounds.y1 + origin.y,
+          z1: verified.bounds.z1 + origin.z, x2: verified.bounds.x2 + origin.x,
+          y2: verified.bounds.y2 + origin.y, z2: verified.bounds.z2 + origin.z,
         };
-      }
-
-      const commands = spansToCommands(verified.spans, origin);
-      log(`build "${plan.name}" for ${player} at ${origin.x},${origin.y},${origin.z}: `
-        + `${verified.blocks} blocks, ${commands.length} commands, ${attempts} attempt(s), ${model}`);
-
-      setProgress('placing', `Building "${plan.name}"`, 0, commands.length);
-      notify(`Building "${plan.name}" - ${verified.blocks} blocks...`, 'progress');
-
-      const pad = lim.maxExtent;
-      await rcon.send(
-        `forceload add ${origin.x - pad} ${origin.z - pad} ${origin.x + pad} ${origin.z + pad}`,
-      ).catch(() => {});
-
-      const region = {
-        x1: verified.bounds.x1 + origin.x, y1: verified.bounds.y1 + origin.y,
-        z1: verified.bounds.z1 + origin.z, x2: verified.bounds.x2 + origin.x,
-        y2: verified.bounds.y2 + origin.y, z2: verified.bounds.z2 + origin.z,
-      };
-      // Take the undo snapshot, retrying once. This is the step that fails
-      // when the server is busy (a pre-generation pass, or a big render), and
-      // a build with no snapshot can never be undone - so it's worth a retry
-      // and a loud log rather than a silent downgrade.
-      setProgress('snapshot', 'Saving the area so this can be undone', 0, 0);
-      let snap = null;
-      for (let attempt = 1; attempt <= 2 && !snap; attempt++) {
-        try {
-          snap = await snapshot(rcon, region, slotFor(player));
-        } catch (e) {
-          log(`SNAPSHOT FAILED (attempt ${attempt}/2) for ${player}: ${e.message}`);
-          if (attempt < 2) await new Promise((r) => setTimeout(r, 3000));
+        // Take the undo snapshot, retrying once. This is the step that fails
+        // when the server is busy (a pre-generation pass, or a big render), and
+        // a build with no snapshot can never be undone - so it's worth a retry
+        // and a loud log rather than a silent downgrade.
+        setProgress('snapshot', 'Saving the area so this can be undone', 0, 0);
+        let snap = null;
+        for (let attempt = 1; attempt <= 2 && !snap; attempt++) {
+          try {
+            snap = await snapshot(rcon, region, slotFor(player));
+          } catch (e) {
+            log(`SNAPSHOT FAILED (attempt ${attempt}/2) for ${player}: ${e.message}`);
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 3000));
+          }
         }
-      }
-      if (!snap) log(`WARNING: building "${description}" with NO UNDO available`);
+        if (!snap) log(`WARNING: building "${description}" with NO UNDO available`);
 
-      // Now the area is safely recorded, take the trees out of it.
-      setProgress('clearing', 'Clearing trees off the site', 0, 0);
-      await clearFoliage(rcon, region);
+        // Now the area is safely recorded, take the trees out of it.
+        setProgress('clearing', 'Clearing trees off the site', 0, 0);
+        await clearFoliage(rcon, region);
 
-      let done = 0;
-      for (const cmd of commands) {
-        const res = await rcon.send(cmd);
-        if (/^(Failed|Unknown|Incorrect|That position)/i.test(res.trim())) {
-          log(`command rejected: ${cmd} -> ${res.trim().slice(0, 120)}`);
+        let done = 0;
+        for (const cmd of commands) {
+          const res = await rcon.send(cmd);
+          if (/^(Failed|Unknown|Incorrect|That position)/i.test(res.trim())) {
+            log(`command rejected: ${cmd} -> ${res.trim().slice(0, 120)}`);
+          }
+          if (++done % 40 === 0) {
+            setProgress('placing', `Building "${plan.name}"`, done, commands.length);
+            await new Promise((r) => setTimeout(r, 60));
+          }
         }
-        if (++done % 40 === 0) {
-          setProgress('placing', `Building "${plan.name}"`, done, commands.length);
-          await new Promise((r) => setTimeout(r, 60));
-        }
-      }
-
-      await rcon.send(
-        `forceload remove ${origin.x - pad} ${origin.z - pad} ${origin.x + pad} ${origin.z + pad}`,
-      ).catch(() => {});
+        return { origin, region, snap, commands };
+      });
+      const { origin, region, snap, commands } = placed;
 
       const seconds = Number(((Date.now() - started) / 1000).toFixed(1));
       // Charged only once the blocks are actually in the ground: a build that

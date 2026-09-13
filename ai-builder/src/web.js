@@ -151,43 +151,44 @@ async function addBlueMapWorld(name, type, log) {
 
 // Flatten (or clear) a square of ground so there is somewhere sensible to build.
 async function prepareSite(rcon, x, z, half, mode, material, log) {
-  const { findSurfaceY, footprintSurfaceY } = await import('./build.js');
+  const { footprintSurfaceY } = await import('./build.js');
   const { snapshot } = await import('./undo.js');
   const { siteFillCommands } = await import('./compile.js');
+  const { withForceload, waitLoaded } = await import('./forceload.js');
 
-  await rcon.send(`forceload add ${x - half - 16} ${z - half - 16} ${x + half + 16} ${z + half + 16}`)
-    .catch(() => {});
-  await new Promise((r) => setTimeout(r, 1500));
+  const area = { x1: x - half - 16, z1: z - half - 16, x2: x + half + 16, z2: z + half + 16 };
+  // Released in a finally, however the flatten ends.
+  return withForceload(rcon, [area], async () => {
+    await waitLoaded(rcon, [{ x: x - half, y: 0, z: z - half }, { x: x + half, y: 0, z: z + half }], 30000);
 
-  // Sea level is 63. A pad levelled at or below it floods the moment the
-  // surrounding water flows back in - which is exactly what happened to a whole
-  // showcase built on "flat" ground that turned out to be ocean. Lift the pad
-  // clear of the water and it becomes an island instead of a puddle.
-  const SEA_LEVEL = 63;
-  const natural = await footprintSurfaceY(rcon, x, z, half, half);
-  const ground = Math.max(natural, SEA_LEVEL + 3);
-  const raised = ground > natural;
-  const top = ground + 40;                 // clear headroom above the pad
-  const region = { x1: x - half, y1: ground - 6, z1: z - half, x2: x + half, y2: top, z2: z + half };
+    // Sea level is 63. A pad levelled at or below it floods the moment the
+    // surrounding water flows back in - which is exactly what happened to a
+    // whole showcase built on "flat" ground that turned out to be ocean. Lift
+    // the pad clear of the water and it becomes an island instead of a puddle.
+    const SEA_LEVEL = 63;
+    const natural = await footprintSurfaceY(rcon, x, z, half, half);
+    const ground = Math.max(natural, SEA_LEVEL + 3);
+    const raised = ground > natural;
+    const top = ground + 40;                 // clear headroom above the pad
+    const region = { x1: x - half, y1: ground - 6, z1: z - half, x2: x + half, y2: top, z2: z + half };
 
-  // Same undo guarantee as a build: snapshot before touching anything.
-  let snap = null;
-  try { snap = await snapshot(rcon, region, 15); } catch (e) { log(`prepare snapshot failed: ${e.message}`); }
+    // Same undo guarantee as a build: snapshot before touching anything.
+    let snap = null;
+    try { snap = await snapshot(rcon, region, 15); } catch (e) { log(`prepare snapshot failed: ${e.message}`); }
 
-  const chunks = siteFillCommands(region, ground, material);
-  let changed = 0;
-  for (const c of chunks) {
-    const r = await rcon.send(c);
-    const m = r.match(/filled (\d+)/i);
-    if (m) changed += Number(m[1]);
-  }
-  await rcon.send(`forceload remove ${x - half - 16} ${z - half - 16} ${x + half + 16} ${z + half + 16}`)
-    .catch(() => {});
+    const chunks = siteFillCommands(region, ground, material);
+    let changed = 0;
+    for (const c of chunks) {
+      const r = await rcon.send(c);
+      const m = r.match(/filled (\d+)/i);
+      if (m) changed += Number(m[1]);
+    }
 
-  return {
-    x, z, y: ground, size: half * 2, blocks: changed, undoable: Boolean(snap), mode,
-    raised, naturalGround: natural,
-  };
+    return {
+      x, z, y: ground, size: half * 2, blocks: changed, undoable: Boolean(snap), mode,
+      raised, naturalGround: natural,
+    };
+  });
 }
 
 // Minimal reverse proxy for the map tiles.
@@ -269,11 +270,17 @@ export function startWebServer({ env, state, saveState, builder, rewards, log, g
     return true;
   }
 
-  const rcon = () => {
-    const r = getRcon();
-    if (!r) throw new Error('server connection not ready');
-    return r;
+  // A stable handle that looks the connection up on EVERY command. Handing a
+  // build the client object itself pinned it to that one connection: when it
+  // dropped and a new one was made, the build kept sending into the dead one.
+  const live = {
+    send: (command) => {
+      const r = getRcon();
+      if (!r) return Promise.reject(new Error('server connection not ready'));
+      return r.send(command);
+    },
   };
+  const rcon = () => live;
   const strip = (s) => s.replace(/§[0-9a-fk-or]/g, '').trim();
 
   async function handleApi(req, res, url) {
