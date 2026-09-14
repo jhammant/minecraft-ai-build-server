@@ -8,10 +8,16 @@
 import fs from 'node:fs';
 import { generateBuildPlan } from './llm.js';
 import { validatePlan, ValidationError, WORLD_MIN_Y, WORLD_MAX_Y } from './validate.js';
-import { spansToCommands } from './compile.js';
+import {
+  spansToCommands, detailCommands, creatureCommands, BUILD_TAG_RE, planFoundation, foundationCommands,
+} from './compile.js';
 import { renderIso } from './render-iso.js';
 import { encodePNG } from './png.js';
 import { snapshot, restore, slotFor } from './undo.js';
+import { withForceload, waitLoaded, padArea } from './forceload.js';
+import { createBlockChecker } from './blocks.js';
+import { budgetFor, isSize, SIZES, withGrace } from './size.js';
+import { interiorGaps, wantedFurniture } from './interior.js';
 
 export { ValidationError };
 
@@ -37,6 +43,11 @@ const forwardVector = (yaw) => {
   return { x: -Math.sin(rad), z: Math.cos(rad) };
 };
 
+// How far ahead of the player to put a build so it clears their own body.
+const reachFor = (bounds) => 4 + Math.max(
+  Math.abs(bounds.x1), Math.abs(bounds.x2), Math.abs(bounds.z1), Math.abs(bounds.z2),
+);
+
 // There's no "give me the terrain height" command, so find the highest solid
 // block by binary search and build on top of it.
 //
@@ -49,13 +60,29 @@ const forwardVector = (yaw) => {
 // alone buries anything wider than the terrain is flat - the ground rises under
 // one corner and swallows the build. Sit on the highest point instead.
 export async function footprintSurfaceY(rcon, cx, cz, halfX, halfZ) {
-  const xs = [cx, cx - halfX, cx + halfX, cx, cx, cx - halfX, cx + halfX, cx - halfX, cx + halfX];
-  const zs = [cz, cz, cz, cz - halfZ, cz + halfZ, cz - halfZ, cz + halfZ, cz + halfZ, cz - halfZ];
-  let best = -Infinity;
-  for (let i = 0; i < xs.length; i++) {
-    best = Math.max(best, await findSurfaceY(rcon, xs[i], zs[i]));
+  const { high } = await footprintGround(rcon, {
+    x1: cx - halfX, z1: cz - halfZ, x2: cx + halfX, z2: cz + halfZ,
+  });
+  return high;
+}
+
+// Ground across a footprint {x1,z1,x2,z2}: the highest point (where the build
+// sits, so nothing is buried) and the lowest (how far a foundation must reach
+// so the low side isn't left hanging). Nine samples: corners, edge midpoints
+// and the middle.
+export async function footprintGround(rcon, rect) {
+  const mx = Math.round((rect.x1 + rect.x2) / 2);
+  const mz = Math.round((rect.z1 + rect.z2) / 2);
+  let high = -Infinity;
+  let low = Infinity;
+  for (const x of [rect.x1, mx, rect.x2]) {
+    for (const z of [rect.z1, mz, rect.z2]) {
+      // The build sits on the water; the foundation reaches down to the bed.
+      high = Math.max(high, await findSurfaceY(rcon, x, z));
+      low = Math.min(low, await findSurfaceY(rcon, x, z, { throughFluid: true }));
+    }
   }
-  return best;
+  return { high, low };
 }
 
 // Foliage the probe must see straight through. A binary search from the sky
@@ -65,7 +92,14 @@ const FOLIAGE = ['#minecraft:leaves', '#minecraft:logs', '#minecraft:replaceable
   'bamboo', 'cactus', 'sugar_cane', 'vine', 'snow'];
 const MAX_CANOPY = 48;       // tallest jungle tree, with room to spare
 
-export async function findSurfaceY(rcon, x, z) {
+// Water and lava are ground to stand on, not foliage to see through - but
+// #minecraft:replaceable lists both, so the probe used to walk through a lake to
+// its bed. A test cottage went up at y 50 under 12 blocks of water, and every
+// door opening it cut filled straight back up. Only the foundation depth still
+// wants the bed, so it asks for `throughFluid`.
+const FLUIDS = ['minecraft:water', 'minecraft:lava'];
+
+export async function findSurfaceY(rcon, x, z, { throughFluid = false } = {}) {
   const isAir = async (y) => /Test passed/i.test(
     await rcon.send(`execute if block ${x} ${y} ${z} air`),
   );
@@ -83,6 +117,16 @@ export async function findSurfaceY(rcon, x, z) {
   // measurement never changes the world before the undo snapshot is taken.
   let y = lo;
   for (let step = 0; step < MAX_CANOPY; step++) {
+    if (!throughFluid) {
+      let fluid = false;
+      for (const kind of FLUIDS) {
+        if (/Test passed/i.test(await rcon.send(`execute if block ${x} ${y} ${z} ${kind}`))) {
+          fluid = true;
+          break;
+        }
+      }
+      if (fluid) break;
+    }
     let leafy = false;
     for (const kind of FOLIAGE) {
       if (/Test passed/i.test(await rcon.send(`execute if block ${x} ${y} ${z} ${kind}`))) {
@@ -154,8 +198,14 @@ const NO_REWARDS = {
   limitsFor: (_player, base) => base,
 };
 
-export function createBuilder({ env, limits, state, saveState, log, rewards = NO_REWARDS }) {
+export function createBuilder({
+  env, limits, state, saveState, log, rewards = NO_REWARDS,
+  // Injectable so the placement pipeline can be tested without paying for a
+  // model call.
+  generate = generateBuildPlan,
+}) {
   let busy = false;
+  const blockChecker = createBlockChecker({ log });
   // A single "Thinking..." then silence for four minutes reads as a hang. Track
   // what the build is actually doing so the panel can show it.
   let progress = null;
@@ -220,8 +270,9 @@ export function createBuilder({ env, limits, state, saveState, log, rewards = NO
    * @param {string}   o.description  what to build
    * @param {object=}  o.at           explicit {x,y,z}; omit to build in front of the player
    * @param {function} o.notify       (message, kind) => void, for progress
+   * @param {string=}  o.size         small | medium | large | huge
    */
-  async function run({ rcon, player, description, at, notify = () => {} }) {
+  async function run({ rcon, player, description, at, size, notify = () => {} }) {
     if (busy) throw new Error('Someone else is building right now - try again in a moment!');
     const limited = rateLimit(player) || globalLimit();
     if (limited) throw new Error(limited);
@@ -234,26 +285,40 @@ export function createBuilder({ env, limits, state, saveState, log, rewards = NO
     const broke = rewards.check(player);
     if (broke) throw new Error(broke);
 
-    // Rank only ever narrows the server's envelope (see limitsFor), so this is
-    // safe to hand straight to the validator.
-    const lim = rewards.limitsFor(player, limits);
+    if (size && !isSize(size)) {
+      throw new Error(`"${size}" isn't a size - pick ${Object.keys(SIZES).join(', ')}.`);
+    }
+
+    // Rank only ever narrows the server's envelope (see limitsFor), and the
+    // size budget only narrows it further, so this is safe to hand straight to
+    // the validator.
+    const ranked = rewards.limitsFor(player, limits);
+    const budget = budgetFor({ size, description, maxExtent: ranked.maxExtent });
+    const lim = { ...ranked, budget };
 
     busy = true;
     const started = Date.now();
+    // Names this build in the world: every animal it summons carries it, so
+    // undo removes those and nobody else's.
+    const tag = `aib_${started.toString(36)}`;
     try {
       // Decide the ground level first: validation needs origin.y to check the
       // build won't poke through the top or bottom of the world.
       let originY;
       let placement;
       if (at && Number.isFinite(at.x) && Number.isFinite(at.z)) {
-        // Load the area BEFORE probing it. In an unloaded chunk every
-        // `execute if block` fails, which reads as "solid" and sends the
-        // surface search to the world ceiling.
-        const p = lim.maxExtent;
-        await rcon.send(`forceload add ${at.x - p} ${at.z - p} ${at.x + p} ${at.z + p}`).catch(() => {});
-        await new Promise((r) => setTimeout(r, 1200));
-        originY = Number.isFinite(at.y) ? Math.floor(at.y) : await findSurfaceY(rcon, at.x, at.z);
         placement = { mode: 'at', x: Math.round(at.x), z: Math.round(at.z) };
+        // Load the spot BEFORE probing it. In an unloaded chunk every
+        // `execute if block` fails, which reads as "solid" and sends the
+        // surface search to the world ceiling. Released straight after: the
+        // model is about to think for minutes, and nothing needs these chunks
+        // ticking while it does.
+        originY = Number.isFinite(at.y) ? Math.floor(at.y)
+          : await withForceload(rcon, [padArea({ x1: placement.x, z1: placement.z,
+            x2: placement.x, z2: placement.z }, 16)], async () => {
+            await waitLoaded(rcon, [{ x: placement.x, y: 0, z: placement.z }], 20000);
+            return findSurfaceY(rcon, placement.x, placement.z);
+          });
       } else {
         const pos = await getPlayerPos(rcon, player);
         const yaw = await getPlayerYaw(rcon, player);
@@ -264,11 +329,52 @@ export function createBuilder({ env, limits, state, saveState, log, rewards = NO
       setProgress('thinking', `Designing "${description}"`, 0, 0);
       notify(`Thinking about "${description}"...`, 'info');
 
-      const verify = (plan) => validatePlan(plan, { x: 0, y: originY, z: 0 }, lim);
-      const onAttempt = (n, of) => setProgress('thinking',
-        n === 1 ? `Designing "${description}"` : `Retry ${n} of ${of} — the first plan didn't pass the safety check`, 0, 0);
-      const { plan, verified, usage, attempts, model } = await generateBuildPlan(
-        description, env, verify, { onAttempt },
+      let nudged = false;
+      let attempt = null;       // unknown until the model loop reports it
+      const verify = async (plan) => {
+        // The last attempt gets a little slack on the size the player asked for.
+        // The budget is there to stop 2x overshoots - an aquarium asked for at
+        // about 40 came out 81 wide and ran into the next build - but a farm
+        // redrawn three times at 54 against a cap of 50 ended in an error and
+        // nothing built at all. The model is still told the real budget.
+        const lastTry = Boolean(budget && attempt && attempt.n === attempt.of);
+        const limNow = lastTry ? { ...lim, budget: withGrace(budget, lim.maxExtent) } : lim;
+        const checked = validatePlan(plan, { x: 0, y: originY, z: 0 }, limNow);
+        if (lastTry && (checked.size.x > budget.footprint || checked.size.z > budget.footprint
+          || checked.size.y > budget.height)) {
+          log(`size note: "${plan.name}" is ${checked.size.x}x${checked.size.z}, over the asked-for `
+            + `${budget.footprint}x${budget.footprint}; accepted on the last attempt`);
+        }
+        // The validator knows the id is well-formed; only the server knows it
+        // exists. An id it doesn't recognise used to be dropped silently at
+        // build time - 47 plants vanished from one aquarium - so ask first,
+        // and send the answer back to the model like any other rejection.
+        const unknown = await blockChecker.unknown(rcon, checked.materials);
+        if (unknown.length) {
+          throw new ValidationError(
+            `these are not block ids in Minecraft Java 26.1 and would not be placed: `
+            + `${unknown.map((u) => `${u.material} (${u.reason})`).join('; ')}. `
+            + 'Use exact current ids, e.g. seagrass, dirt_path, short_grass, oak_planks.',
+          );
+        }
+        // Once, and only once: a house with no door, or a bedroom with no bed.
+        const gaps = interiorGaps(description, checked);
+        if (gaps.length && !nudged) {
+          nudged = true;
+          throw new ValidationError(`nearly there, but the plan is missing ${gaps.join('; ')}. `
+            + 'Add them (keep everything else as it is).');
+        }
+        if (gaps.length) log(`interior note: "${plan.name}" still has no ${gaps.join('; ')}`);
+        return checked;
+      };
+      const onAttempt = (n, of) => {
+        attempt = { n, of };
+        setProgress('thinking',
+          n === 1 ? `Designing "${description}"` : `Retry ${n} of ${of} — the first plan didn't pass the safety check`, 0, 0);
+      };
+      const { plan, verified, usage, attempts, model } = await generate(
+        description, env, verify,
+        { onAttempt, prompt: { budget, limits: lim, wanted: wantedFurniture(description) } },
       );
 
       // Now the plan exists, its real size is known - so a hut costs a hut and
@@ -279,88 +385,103 @@ export function createBuilder({ env, limits, state, saveState, log, rewards = NO
           + `- you have ${bill.credits}. Ask for something smaller, or go and build a bit more!`);
       }
 
-      let origin;
-      if (placement.mode === 'at') {
-        // Now the footprint is known, re-check the ground across it rather than
-        // trusting the single probe taken before the plan existed.
+      // Where the build goes across x/z is known now; only its height may still
+      // need the ground probed. Everything from here to the last block placed
+      // runs with the site force-loaded, and the chunks are released however it
+      // ends - a failure used to leave hundreds of them loaded for good.
+      const ox = placement.mode === 'at' ? placement.x : Math.round(placement.pos.x
+        + forwardVector(placement.yaw).x * reachFor(verified.bounds));
+      const oz = placement.mode === 'at' ? placement.z : Math.round(placement.pos.z
+        + forwardVector(placement.yaw).z * reachFor(verified.bounds));
+      const site = {
+        x1: verified.bounds.x1 + ox, z1: verified.bounds.z1 + oz,
+        x2: verified.bounds.x2 + ox, z2: verified.bounds.z2 + oz,
+      };
+
+      const placed = await withForceload(rcon, [padArea(site, 16)], async () => {
+        await waitLoaded(rcon, [{ x: site.x1, y: 0, z: site.z1 }, { x: site.x2, y: 0, z: site.z2 }], 30000);
+
+        // Now the footprint is known, measure the ground across it rather than
+        // trusting the single probe taken before the plan existed. An explicit
+        // height is taken as given, with no foundation.
         let y = originY;
+        let ground = null;
         if (!Number.isFinite(at?.y)) {
-          const halfX = Math.ceil(verified.size.x / 2);
-          const halfZ = Math.ceil(verified.size.z / 2);
-          const ground = await footprintSurfaceY(rcon, placement.x, placement.z, halfX, halfZ);
-          if (Number.isFinite(ground)
-              && ground + verified.bounds.y2 <= WORLD_MAX_Y
-              && ground + verified.bounds.y1 >= WORLD_MIN_Y) {
-            y = ground;
+          setProgress('placing', 'Measuring the ground', 0, 0);
+          ground = await footprintGround(rcon, site);
+          if (placement.mode === 'at' && Number.isFinite(ground.high)
+              && ground.high + verified.bounds.y2 <= WORLD_MAX_Y
+              && ground.high + verified.bounds.y1 >= WORLD_MIN_Y) {
+            y = ground.high;
           }
         }
-        origin = { x: placement.x, y, z: placement.z };
-      } else {
-        // Push the build clear of the player's own body.
-        const fwd = forwardVector(placement.yaw);
-        const reach = 4 + Math.max(
-          Math.abs(verified.bounds.x1), Math.abs(verified.bounds.x2),
-          Math.abs(verified.bounds.z1), Math.abs(verified.bounds.z2),
-        );
-        origin = {
-          x: Math.round(placement.pos.x + fwd.x * reach),
-          y: originY,
-          z: Math.round(placement.pos.z + fwd.z * reach),
+        const origin = { x: ox, y, z: oz };
+        // Only a build that meets the ground somewhere gets a foundation. One
+        // summoned in front of a player flying high above it stays in the air,
+        // as they presumably meant.
+        const foundation = ground && ground.high >= y - 1
+          ? planFoundation(verified, origin, ground.low, { minY: WORLD_MIN_Y })
+          : null;
+
+        // Structure first, then the details pass: doors, beds and everything
+        // that needs a wall or floor to exist before it can stay put.
+        const commands = [
+          // Under everything else, so the build has something to stand on.
+          ...foundationCommands(foundation),
+          ...spansToCommands(verified.spans, origin),
+          ...detailCommands(verified.details, origin),
+          // Last of all, so the pen or the tank is there to receive them.
+          ...creatureCommands(verified.creatures, origin, tag),
+        ];
+        log(`build "${plan.name}" for ${player} at ${origin.x},${origin.y},${origin.z}: `
+          + `${verified.blocks} blocks, ${commands.length} commands, ${attempts} attempt(s), ${model}`
+          + (foundation ? `, foundation of ${foundation.material} down to y=${foundation.bottom}` : ''));
+
+        setProgress('placing', `Building "${plan.name}"`, 0, commands.length);
+        notify(`Building "${plan.name}" - ${verified.blocks} blocks...`, 'progress');
+
+        const region = {
+          x1: verified.bounds.x1 + origin.x, y1: verified.bounds.y1 + origin.y,
+          z1: verified.bounds.z1 + origin.z, x2: verified.bounds.x2 + origin.x,
+          y2: verified.bounds.y2 + origin.y, z2: verified.bounds.z2 + origin.z,
         };
-      }
-
-      const commands = spansToCommands(verified.spans, origin);
-      log(`build "${plan.name}" for ${player} at ${origin.x},${origin.y},${origin.z}: `
-        + `${verified.blocks} blocks, ${commands.length} commands, ${attempts} attempt(s), ${model}`);
-
-      setProgress('placing', `Building "${plan.name}"`, 0, commands.length);
-      notify(`Building "${plan.name}" - ${verified.blocks} blocks...`, 'progress');
-
-      const pad = lim.maxExtent;
-      await rcon.send(
-        `forceload add ${origin.x - pad} ${origin.z - pad} ${origin.x + pad} ${origin.z + pad}`,
-      ).catch(() => {});
-
-      const region = {
-        x1: verified.bounds.x1 + origin.x, y1: verified.bounds.y1 + origin.y,
-        z1: verified.bounds.z1 + origin.z, x2: verified.bounds.x2 + origin.x,
-        y2: verified.bounds.y2 + origin.y, z2: verified.bounds.z2 + origin.z,
-      };
-      // Take the undo snapshot, retrying once. This is the step that fails
-      // when the server is busy (a pre-generation pass, or a big render), and
-      // a build with no snapshot can never be undone - so it's worth a retry
-      // and a loud log rather than a silent downgrade.
-      setProgress('snapshot', 'Saving the area so this can be undone', 0, 0);
-      let snap = null;
-      for (let attempt = 1; attempt <= 2 && !snap; attempt++) {
-        try {
-          snap = await snapshot(rcon, region, slotFor(player));
-        } catch (e) {
-          log(`SNAPSHOT FAILED (attempt ${attempt}/2) for ${player}: ${e.message}`);
-          if (attempt < 2) await new Promise((r) => setTimeout(r, 3000));
+        // The snapshot reaches down to the foundation, so undo takes that away
+        // too and puts the river back.
+        const snapRegion = foundation ? { ...region, y1: Math.min(region.y1, foundation.bottom) } : region;
+        // Take the undo snapshot, retrying once. This is the step that fails
+        // when the server is busy (a pre-generation pass, or a big render), and
+        // a build with no snapshot can never be undone - so it's worth a retry
+        // and a loud log rather than a silent downgrade.
+        setProgress('snapshot', 'Saving the area so this can be undone', 0, 0);
+        let snap = null;
+        for (let attempt = 1; attempt <= 2 && !snap; attempt++) {
+          try {
+            snap = await snapshot(rcon, snapRegion, slotFor(player));
+          } catch (e) {
+            log(`SNAPSHOT FAILED (attempt ${attempt}/2) for ${player}: ${e.message}`);
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 3000));
+          }
         }
-      }
-      if (!snap) log(`WARNING: building "${description}" with NO UNDO available`);
+        if (!snap) log(`WARNING: building "${description}" with NO UNDO available`);
 
-      // Now the area is safely recorded, take the trees out of it.
-      setProgress('clearing', 'Clearing trees off the site', 0, 0);
-      await clearFoliage(rcon, region);
+        // Now the area is safely recorded, take the trees out of it.
+        setProgress('clearing', 'Clearing trees off the site', 0, 0);
+        await clearFoliage(rcon, region);
 
-      let done = 0;
-      for (const cmd of commands) {
-        const res = await rcon.send(cmd);
-        if (/^(Failed|Unknown|Incorrect|That position)/i.test(res.trim())) {
-          log(`command rejected: ${cmd} -> ${res.trim().slice(0, 120)}`);
+        let done = 0;
+        for (const cmd of commands) {
+          const res = await rcon.send(cmd);
+          if (/^(Failed|Unknown|Incorrect|That position|Could not|Unable)/i.test(res.trim())) {
+            log(`command rejected: ${cmd} -> ${res.trim().slice(0, 120)}`);
+          }
+          if (++done % 40 === 0) {
+            setProgress('placing', `Building "${plan.name}"`, done, commands.length);
+            await new Promise((r) => setTimeout(r, 60));
+          }
         }
-        if (++done % 40 === 0) {
-          setProgress('placing', `Building "${plan.name}"`, done, commands.length);
-          await new Promise((r) => setTimeout(r, 60));
-        }
-      }
-
-      await rcon.send(
-        `forceload remove ${origin.x - pad} ${origin.z - pad} ${origin.x + pad} ${origin.z + pad}`,
-      ).catch(() => {});
+        return { origin, region, snap, commands, foundation };
+      });
+      const { origin, region, snap, commands, foundation } = placed;
 
       const seconds = Number(((Date.now() - started) / 1000).toFixed(1));
       // Charged only once the blocks are actually in the ground: a build that
@@ -369,6 +490,7 @@ export function createBuilder({ env, limits, state, saveState, log, rewards = NO
       state.builds[player] = [...(state.builds[player] || []), Date.now()];
       state.lastBuild[player] = {
         name: plan.name, at: Date.now(), origin, blocks: verified.blocks, snap,
+        tag: verified.creatures.length ? tag : undefined,
       };
       // OpenRouter returns the actual charged cost; fall back to a rough token
       // estimate for backends that don't.
@@ -383,7 +505,10 @@ export function createBuilder({ env, limits, state, saveState, log, rewards = NO
         { player, name: plan.name, summary: plan.summary, description,
           origin, blocks: verified.blocks, seconds, at: builtAt,
           ops: plan.ops.length, commands: commands.length, model,
-          shot: saveShot(`${env.STATE_DIR || '/state'}/shots`, builtAt, verified.spans, log),
+          shot: saveShot(`${env.STATE_DIR || '/state'}/shots`, builtAt, verified.preview, log),
+          doors: verified.details.doors.length, beds: verified.details.beds.length,
+          creatures: verified.creatures.length,
+          foundation: foundation ? origin.y - foundation.bottom : 0,
           size: verified.size, cost, materials: topMaterials(verified.spans),
           price: bill.price || 0, band: bill.band,
           // Kept so a build can be located (and cleared) even if its undo
@@ -395,7 +520,7 @@ export function createBuilder({ env, limits, state, saveState, log, rewards = NO
 
       return {
         name: plan.name, summary: plan.summary, blocks: verified.blocks,
-        size: verified.size, origin, seconds, model, attempts,
+        size: verified.size, origin, seconds, model, attempts, budget,
         undoable: Boolean(snap), usage,
         cost, spentToday: spentToday(), dailyCostLimit,
         price: bill.price || 0, band: bill.band, wallet,
@@ -410,7 +535,16 @@ export function createBuilder({ env, limits, state, saveState, log, rewards = NO
     const last = state.lastBuild[player];
     if (!last) throw new Error("You haven't built anything for me to undo yet.");
     if (!last.snap) throw new Error(`I don't have a snapshot of "${last.name}" to restore.`);
-    await restore(rcon, last.snap);
+    // Keep the site loaded across both steps: the animals are entities, and a
+    // kill only finds entities in loaded chunks.
+    await withForceload(rcon, [padArea(last.snap.region, 16)], async () => {
+      await restore(rcon, last.snap);
+      // The tag is re-checked because it comes back out of state.json.
+      if (last.tag && BUILD_TAG_RE.test(last.tag)) {
+        const res = await rcon.send(`kill @e[type=!minecraft:player,tag=${last.tag}]`);
+        log(`undo "${last.name}": ${String(res).trim() || 'no creatures to remove'}`);
+      }
+    });
     const name = last.name;
     delete state.lastBuild[player];
     saveState(state);

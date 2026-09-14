@@ -18,10 +18,12 @@ In game, anyone types:
 
 ```text
 !build a wizard tower with a spiral staircase
+!build small a cosy hut with a bed and a chest
 !undo
 ```
 
-In the browser: move the map, describe what you want, press **Build it**. Watch
+In the browser: move the map, describe what you want, pick how big, press
+**Build it**. On an iPad, *Add to Home Screen* opens the panel full screen. Watch
 the phase and the fill count while it works. Add a friend to the whitelist in ten
 seconds. Create a new world from a dropdown, and set its game mode.
 
@@ -51,8 +53,9 @@ list of numbers.
 ## Why it's safe to point an LLM at your kid's world
 
 The model **never emits a command that gets executed**. It returns an abstract
-*build plan* — a list of shapes — which is validated, and only then compiled into
-`/fill` commands. The model proposes; the validator disposes.
+*build plan* — a list of shapes, doors, beds and animals — which is validated, and
+only then compiled into `/fill`, `/setblock` and `/summon` commands that the
+compiler writes itself. The model proposes; the validator disposes.
 
 ```mermaid
 flowchart LR
@@ -60,12 +63,13 @@ flowchart LR
     B -->|build plan<br/>JSON shapes| C{VALIDATOR}
     C -->|rejected| X["explained to the player<br/>nothing runs"]
     C -->|accepted| D[compiler]
-    D -->|/fill commands| E[(Minecraft)]
+    D -->|fill · setblock · summon| E[(Minecraft)]
     E --> F[3D web map]
 
     C -.checks.-> C1["banned blocks<br/>lava · TNT · bedrock<br/>command blocks · spawners"]
     C -.checks.-> C2["size + block ceilings<br/>world height bounds"]
     C -.checks.-> C3["strict block-name pattern<br/>no command injection"]
+    C -.checks.-> C4["passive-mob allowlist<br/>every block id confirmed by the server"]
 ```
 
 A hallucinating — or prompt-injected — model can at worst produce a plan that
@@ -87,6 +91,21 @@ leaves, logs, vines and snow until it hits real ground, and the footprint is
 measured across all nine corners rather than the centre alone. Trees standing
 inside the footprint are cleared *after* the undo snapshot is taken, so undo puts
 the wood back.
+
+The build sits on the highest ground under it, so nothing is buried — and where
+the land falls away (a slope, a river bank) a foundation fills the gap from the
+lowest ground up, replacing only air and water, inside the undo snapshot.
+
+### Doors, beds and animals
+
+A door is two blocks and a bed is two blocks, and a `/fill` places one half of
+either. Torches hang on walls that may not exist yet. So walls go in first, then
+a details pass places doors, beds and anything fragile with `/setblock`, then
+animals are summoned — tagged with the build, so `!undo` takes them away too.
+
+Each request carries a size budget — *small, medium, large, huge*, or the
+dimensions typed in ("about 40 by 40") — and a plan that ignores it is sent back
+to be redrawn smaller.
 
 ### Undo that actually restores
 
@@ -210,7 +229,7 @@ exposing the server safely.
 ## Tests
 
 ```bash
-cd ai-builder && npm test    # 78 unit: geometry, validator, network trust, rewards
+cd ai-builder && npm test    # 154 unit: geometry, validator, RCON, details, network trust, rewards
 ./scripts/mc test            # 13 end-to-end against a live server
 ```
 
@@ -233,6 +252,11 @@ Things that cost real time:
   identically — with `response_format` set, one leaked its reasoning trace into
   the content field and truncated. Send `provider: {require_parameters: true}`
   and parse defensively.
+- **RCON takes one request at a time.** The server reads each request with a
+  single read and hangs up if two arrive together — so a status poll landing
+  mid-build dropped the connection. Queue every command behind the last reply.
+- **A half door is invisible.** Scanned block by block, houses the AI "built with
+  doors" had none. Two-block things need both halves placed, first half `strict`.
 - **`forceload` doesn't load chunks synchronously.** Clone too early and it
   succeeds *loudly* while copying the wrong blocks. Poll `execute if loaded`.
 - **Reading a block over RCON:** `execute if block … run say X` tells you

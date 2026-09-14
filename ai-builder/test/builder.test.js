@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  planToSpans, spansToCommands, spansBounds, totalBlocks, spanVolume,
+  planToSpans, spansToCommands, spansBounds, totalBlocks, spanVolume, siteFillCommands,
 } from '../src/compile.js';
 import { validatePlan, ValidationError, WORLD_MAX_Y, paletteNote } from '../src/validate.js';
 
@@ -454,6 +454,13 @@ test('a stairs flight rises one block per step and its treads carry facing', () 
   for (const a of air) assert.equal(a.y2 - a.y1 + 1, 3, 'three blocks of headroom');
 });
 
+test('a stairs op given a material with states still produces one valid blockstate', () => {
+  const spans = planToSpans(plan({
+    op: 'stairs', x: 0, y: 0, z: 0, dir: 'east', steps: 1, material: 'oak_stairs[facing=north]',
+  }));
+  assert.equal(spans[0].material, 'oak_stairs[facing=east,half=bottom]');
+});
+
 test('stairs support columns reach down to the base y', () => {
   const spans = planToSpans(plan({
     op: 'stairs', x: 0, y: 10, z: 0, dir: 'east', steps: 4, width: 1, material: 'stone_bricks',
@@ -549,4 +556,41 @@ test('paletteNote stays quiet when lava lights a dark build', () => {
     { x1: 10, y1: 0, z1: 10, x2: 20, y2: 20, z2: 20, material: 'lava' },
   ];
   assert.equal(paletteNote(spans), null);
+});
+
+// --- site preparation --------------------------------------------------------
+
+// Which block a fill command puts at a given height, or undefined if none covers it.
+const blockAt = (cmds, y) => {
+  for (const c of cmds) {
+    const [, , y1, , , y2, , block] = c.split(' ');
+    if (y >= Number(y1) && y <= Number(y2)) return block;
+  }
+  return undefined;
+};
+
+test('site fill never raises material above the ground line on a small site', () => {
+  // A 29x29 site: the old row-chunked loop filled 62..99 with sand here,
+  // because the chunk took its block from its bottom row.
+  const region = { x1: 6, y1: 62, z1: 286, x2: 34, y2: 108, z2: 314 };
+  const cmds = siteFillCommands(region, 68, 'sand');
+  assert.equal(blockAt(cmds, 62), 'sand');
+  assert.equal(blockAt(cmds, 68), 'sand');
+  assert.equal(blockAt(cmds, 69), 'air');
+  assert.equal(blockAt(cmds, 99), 'air');
+  assert.equal(blockAt(cmds, 108), 'air');
+});
+
+test('site fill covers every row exactly once and respects the fill limit', () => {
+  const region = { x1: -64, y1: 98, z1: 46, x2: 64, y2: 144, z2: 174 };
+  const cmds = siteFillCommands(region, 104, 'grass_block');
+  for (let y = region.y1; y <= region.y2; y++) {
+    const covering = cmds.filter((c) => blockAt([c], y) !== undefined);
+    assert.equal(covering.length > 0, true, `row ${y} not filled`);
+    assert.equal(blockAt(cmds, y), y <= 104 ? 'grass_block' : 'air', `row ${y}`);
+  }
+  for (const c of cmds) {
+    const [, x1, y1, z1, x2, y2, z2] = c.split(' ').map(Number);
+    assert.ok((x2 - x1 + 1) * (y2 - y1 + 1) * (z2 - z1 + 1) <= 32768, c);
+  }
 });
