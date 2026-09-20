@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { isSize } from './size.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -16,6 +17,9 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
+  // Without the right type, Safari ignores the manifest and "Add to Home
+  // Screen" makes a plain bookmark.
+  '.webmanifest': 'application/manifest+json',
 };
 
 const json = (res, code, body) => {
@@ -151,49 +155,44 @@ async function addBlueMapWorld(name, type, log) {
 
 // Flatten (or clear) a square of ground so there is somewhere sensible to build.
 async function prepareSite(rcon, x, z, half, mode, material, log) {
-  const { findSurfaceY, footprintSurfaceY } = await import('./build.js');
+  const { footprintSurfaceY } = await import('./build.js');
   const { snapshot } = await import('./undo.js');
+  const { siteFillCommands } = await import('./compile.js');
+  const { withForceload, waitLoaded } = await import('./forceload.js');
 
-  await rcon.send(`forceload add ${x - half - 16} ${z - half - 16} ${x + half + 16} ${z + half + 16}`)
-    .catch(() => {});
-  await new Promise((r) => setTimeout(r, 1500));
+  const area = { x1: x - half - 16, z1: z - half - 16, x2: x + half + 16, z2: z + half + 16 };
+  // Released in a finally, however the flatten ends.
+  return withForceload(rcon, [area], async () => {
+    await waitLoaded(rcon, [{ x: x - half, y: 0, z: z - half }, { x: x + half, y: 0, z: z + half }], 30000);
 
-  // Sea level is 63. A pad levelled at or below it floods the moment the
-  // surrounding water flows back in - which is exactly what happened to a whole
-  // showcase built on "flat" ground that turned out to be ocean. Lift the pad
-  // clear of the water and it becomes an island instead of a puddle.
-  const SEA_LEVEL = 63;
-  const natural = await footprintSurfaceY(rcon, x, z, half, half);
-  const ground = Math.max(natural, SEA_LEVEL + 3);
-  const raised = ground > natural;
-  const top = ground + 40;                 // clear headroom above the pad
-  const region = { x1: x - half, y1: ground - 6, z1: z - half, x2: x + half, y2: top, z2: z + half };
+    // Sea level is 63. A pad levelled at or below it floods the moment the
+    // surrounding water flows back in - which is exactly what happened to a
+    // whole showcase built on "flat" ground that turned out to be ocean. Lift
+    // the pad clear of the water and it becomes an island instead of a puddle.
+    const SEA_LEVEL = 63;
+    const natural = await footprintSurfaceY(rcon, x, z, half, half);
+    const ground = Math.max(natural, SEA_LEVEL + 3);
+    const raised = ground > natural;
+    const top = ground + 40;                 // clear headroom above the pad
+    const region = { x1: x - half, y1: ground - 6, z1: z - half, x2: x + half, y2: top, z2: z + half };
 
-  // Same undo guarantee as a build: snapshot before touching anything.
-  let snap = null;
-  try { snap = await snapshot(rcon, region, 15); } catch (e) { log(`prepare snapshot failed: ${e.message}`); }
+    // Same undo guarantee as a build: snapshot before touching anything.
+    let snap = null;
+    try { snap = await snapshot(rcon, region, 15); } catch (e) { log(`prepare snapshot failed: ${e.message}`); }
 
-  const chunks = [];
-  const LIMIT = 32768;
-  const step = Math.max(1, Math.floor(LIMIT / ((2 * half + 1) * (2 * half + 1))));
-  for (let y = region.y1; y <= region.y2; y += step) {
-    const y2 = Math.min(y + step - 1, region.y2);
-    const block = (y < ground) ? material : (y === ground ? material : 'air');
-    chunks.push(`fill ${region.x1} ${y} ${region.z1} ${region.x2} ${y2} ${region.z2} ${block}`);
-  }
-  let changed = 0;
-  for (const c of chunks) {
-    const r = await rcon.send(c);
-    const m = r.match(/filled (\d+)/i);
-    if (m) changed += Number(m[1]);
-  }
-  await rcon.send(`forceload remove ${x - half - 16} ${z - half - 16} ${x + half + 16} ${z + half + 16}`)
-    .catch(() => {});
+    const chunks = siteFillCommands(region, ground, material);
+    let changed = 0;
+    for (const c of chunks) {
+      const r = await rcon.send(c);
+      const m = r.match(/filled (\d+)/i);
+      if (m) changed += Number(m[1]);
+    }
 
-  return {
-    x, z, y: ground, size: half * 2, blocks: changed, undoable: Boolean(snap), mode,
-    raised, naturalGround: natural,
-  };
+    return {
+      x, z, y: ground, size: half * 2, blocks: changed, undoable: Boolean(snap), mode,
+      raised, naturalGround: natural,
+    };
+  });
 }
 
 // Minimal reverse proxy for the map tiles.
@@ -275,11 +274,17 @@ export function startWebServer({ env, state, saveState, builder, rewards, log, g
     return true;
   }
 
-  const rcon = () => {
-    const r = getRcon();
-    if (!r) throw new Error('server connection not ready');
-    return r;
+  // A stable handle that looks the connection up on EVERY command. Handing a
+  // build the client object itself pinned it to that one connection: when it
+  // dropped and a new one was made, the build kept sending into the dead one.
+  const live = {
+    send: (command) => {
+      const r = getRcon();
+      if (!r) return Promise.reject(new Error('server connection not ready'));
+      return r.send(command);
+    },
   };
+  const rcon = () => live;
   const strip = (s) => s.replace(/§[0-9a-fk-or]/g, '').trim();
 
   async function handleApi(req, res, url) {
@@ -507,7 +512,10 @@ export function startWebServer({ env, state, saveState, builder, rewards, log, g
       }
 
       case 'POST /api/build': {
-        const { description, x, y, z, player } = await readBody(req);
+        const { description, x, y, z, player, size } = await readBody(req);
+        if (size && !isSize(size)) {
+          return json(res, 400, { error: 'Size must be small, medium, large or huge.' });
+        }
         const named = NAME_RE.test(String(player || ''));
         // With rewards on, an anonymous build would be a free one - so the
         // panel has to say whose credits are being spent.
@@ -522,6 +530,7 @@ export function startWebServer({ env, state, saveState, builder, rewards, log, g
             rcon: rcon(),
             player: who,
             description: String(description || ''),
+            size: size || undefined,
             at: Number.isFinite(x) && Number.isFinite(z) ? { x, y, z } : undefined,
             notify: (msg) => log(`[web] ${msg}`),
           });

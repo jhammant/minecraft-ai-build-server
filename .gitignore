@@ -10,3 +10,6 @@ state/
 scratch/
 out/
 ai-builder/out/
+
+# Session transcripts: exported locally, never committed (public repo)
+.sessions/

@@ -9,6 +9,9 @@
 // apply to what will actually be executed, so a cleverly-worded op can't
 // under-report its size.
 
+import { splitDetails, STEP } from './details.js';
+import { baseOf, isDoublePlant, statesOf } from './blocks.js';
+
 // A span is an inclusive axis-aligned box: {x1,y1,z1,x2,y2,z2,material,mode}
 const span = (x1, y1, z1, x2, y2, z2, material, mode = 'solid') => ({
   x1: Math.min(x1, x2), y1: Math.min(y1, y2), z1: Math.min(z1, z2),
@@ -296,7 +299,10 @@ function opToSpans(op) {
         const y = op.y + i;
         const x2 = x + px * (width - 1);
         const z2 = z + pz * (width - 1);
-        const tread = `${m}[facing=${op.dir || 'north'},half=bottom]`;
+        // From the bare id: a material that already carried states would
+        // otherwise become "oak_stairs[facing=north][facing=east,...]", which
+        // no server parses.
+        const tread = `${baseOf(m)}[facing=${op.dir || 'north'},half=bottom]`;
         out.push(span(x, y, z, x2, y, z2, tread));
         if (op.support !== false && y > op.y) {
           out.push(span(x, op.y, z, x2, y - 1, z2, m));
@@ -383,6 +389,12 @@ function opToSpans(op) {
       break;
     }
 
+    // Placed in the details pass, not as geometry: see compilePlan.
+    case 'door':
+    case 'bed':
+    case 'creatures':
+      break;
+
     default:
       throw new Error(`unknown op: ${op.op}`);
   }
@@ -394,6 +406,60 @@ export function planToSpans(plan) {
   const spans = [];
   for (const op of plan.ops) spans.push(...opToSpans(op));
   return spans;
+}
+
+/**
+ * The whole plan, split into what fill places and what the details pass places.
+ * Validate this, not planToSpans: the details are real blocks too.
+ */
+export function compilePlan(plan) {
+  const raw = [];
+  const doors = [];
+  const beds = [];
+  const creatures = [];
+  for (const op of plan.ops) {
+    if (op.op === 'creatures') {
+      creatures.push(...creaturePositions(op));
+    } else if (op.op === 'door') {
+      doors.push({ x: op.x, y: op.y, z: op.z, material: op.material, facing: op.facing, hinge: op.hinge });
+    } else if (op.op === 'bed') {
+      beds.push({ x: op.x, y: op.y, z: op.z, material: op.material, facing: op.facing });
+    } else {
+      raw.push(...opToSpans(op));
+    }
+  }
+  return { ...splitDetails(raw, { doors, beds }), creatures };
+}
+
+/**
+ * Where each animal of a creatures op stands, in local coordinates.
+ * Explicit points are used as given; an area is filled on an even lattice -
+ * deterministic, so the same plan always puts the cows in the same places.
+ */
+export function creaturePositions(op) {
+  const mob = op.mob;
+  if (Array.isArray(op.points)) {
+    return op.points.map((p) => (Array.isArray(p)
+      ? { mob, x: p[0], y: p[1], z: p[2] }
+      : { mob, x: p.x, y: p.y, z: p.z }));
+  }
+  const x1 = Math.min(op.x1, op.x2); const x2 = Math.max(op.x1, op.x2);
+  const z1 = Math.min(op.z1, op.z2); const z2 = Math.max(op.z1, op.z2);
+  const count = Math.max(1, op.count ?? 1);
+  const cols = Math.ceil(Math.sqrt(count));
+  const rows = Math.ceil(count / cols);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const c = i % cols;
+    const r = Math.floor(i / cols);
+    out.push({
+      mob,
+      x: x1 + Math.floor(((c + 0.5) * (x2 - x1 + 1)) / cols),
+      y: op.y,
+      z: z1 + Math.floor(((r + 0.5) * (z2 - z1 + 1)) / rows),
+    });
+  }
+  return out;
 }
 
 // Bounding box over all spans, in local coordinates.
@@ -486,4 +552,171 @@ export function spansToCommands(spans, origin) {
     }
   }
   return cmds;
+}
+
+// Level a site: `material` up to and including `ground`, air above it.
+// Two spans, so no single fill can straddle the ground line. The old loop cut
+// the region into fixed-height slabs and took each slab's block from its bottom
+// row - on a small site one slab ran from below ground to 30 blocks above it,
+// and "flatten" raised a sand tower with the build perched on top.
+export function siteFillCommands(region, ground, material) {
+  const base = { x1: region.x1, z1: region.z1, x2: region.x2, z2: region.z2, mode: 'solid' };
+  const spans = [];
+  if (region.y1 <= ground) {
+    spans.push({ ...base, y1: region.y1, y2: Math.min(ground, region.y2), material });
+  }
+  if (region.y2 > ground) {
+    spans.push({ ...base, y1: Math.max(ground + 1, region.y1), y2: region.y2, material: 'air' });
+  }
+  return spansToCommands(spans, { x: 0, y: 0, z: 0 });
+}
+
+// Tall plants are two blocks like a door, and need the same two-step placement.
+// Capped: a meadow of sunflowers is two commands per flower.
+const MAX_DOUBLE_PLANTS = 128;
+
+/**
+ * The details pass, as commands. Runs after every structure command, so the
+ * wall a torch hangs on and the floor a bed stands on already exist.
+ *
+ * Two-block things go down in two setblocks, lower (or foot) first. The first
+ * half is placed `strict` - as-is, with no shape update - because on its own it
+ * is an invalid half and an update would remove it. The second half is placed
+ * normally, so the pair settles against its neighbours. Every value here comes
+ * from the validated plan: coordinates are integers, ids passed the block
+ * checks, facing and hinge are from fixed lists.
+ */
+export function detailCommands({ doors = [], beds = [], blocks = [] }, origin) {
+  const at = (x, y, z) => `${x + origin.x} ${y + origin.y} ${z + origin.z}`;
+  const cmds = [];
+  for (const d of doors) {
+    const states = `facing=${d.facing},hinge=${d.hinge}`;
+    // Clear the opening first, so a door that fails to place still leaves a
+    // way in rather than a wall.
+    cmds.push(`fill ${at(d.x, d.y, d.z)} ${at(d.x, d.y + 1, d.z)} air`);
+    cmds.push(`setblock ${at(d.x, d.y, d.z)} ${d.material}[${states},half=lower] strict`);
+    cmds.push(`setblock ${at(d.x, d.y + 1, d.z)} ${d.material}[${states},half=upper]`);
+  }
+  for (const b of beds) {
+    const [dx, dz] = STEP[b.facing];
+    cmds.push(`setblock ${at(b.x, b.y, b.z)} ${b.material}[facing=${b.facing},part=foot] strict`);
+    cmds.push(`setblock ${at(b.x + dx, b.y, b.z + dz)} ${b.material}[facing=${b.facing},part=head]`);
+  }
+  let plants = 0;
+  for (const s of blocks) {
+    const base = baseOf(s.material);
+    if (isDoublePlant(base)) {
+      // An upper half drawn on its own is placed by the lower half below it.
+      if (statesOf(s.material).half === 'upper') continue;
+      for (let z = s.z1; z <= s.z2; z++) {
+        for (let x = s.x1; x <= s.x2; x++) {
+          if (plants++ >= MAX_DOUBLE_PLANTS) continue;
+          cmds.push(`setblock ${at(x, s.y1, z)} ${base}[half=lower] strict`);
+          cmds.push(`setblock ${at(x, s.y1 + 1, z)} ${base}[half=upper]`);
+        }
+      }
+      continue;
+    }
+    if (spanVolume(s) === 1) cmds.push(`setblock ${at(s.x1, s.y1, s.z1)} ${s.material}`);
+    else cmds.push(...spansToCommands([{ ...s, mode: 'solid' }], origin));
+  }
+  return cmds;
+}
+
+// Fish and axolotls also carry FromBucket, the flag that keeps a caught fish
+// from despawning; PersistenceRequired covers everything else.
+const BUCKETABLE = new Set(['tropical_fish', 'cod', 'salmon', 'axolotl']);
+
+export const BUILD_TAG_RE = /^aib_[a-z0-9]{1,24}$/;
+
+/**
+ * Summon commands, run last, once the pens and tanks exist. Every animal is
+ * tagged with the build's id so undo can take back exactly what this build
+ * put there. The mob id comes from the allowlist, the NBT is fixed here, and
+ * the tag is checked against a strict pattern - nothing in it is model text.
+ */
+export function creatureCommands(creatures, origin, tag) {
+  if (!BUILD_TAG_RE.test(tag)) throw new Error(`bad build tag: ${tag}`);
+  return creatures.map((c) => {
+    const nbt = [
+      'PersistenceRequired:1b',
+      ...(BUCKETABLE.has(c.mob) ? ['FromBucket:1b'] : []),
+      `Tags:["aib","${tag}"]`,
+    ].join(',');
+    return `summon minecraft:${c.mob} ${c.x + origin.x + 0.5} ${c.y + origin.y} ${c.z + origin.z + 0.5} {${nbt}}`;
+  });
+}
+
+// --- foundations -----------------------------------------------------------------
+//
+// A build sits at the HIGHEST ground under its footprint, so nothing is buried.
+// On a slope, or half over a river, that left the low side hanging in the air:
+// a haunted house landed with its floor ten blocks above the water. So the gap
+// is filled - from the lowest ground found up to just under the build - only
+// where it is air or water, and only under the parts of the build that
+// actually touch the ground.
+
+export const FOUNDATION_MAX_DEPTH = 24;
+const FOUNDATION_MAX_RECTS = 64;
+// Air, water, lava and the plants that grow in them. Replacing only these
+// means real ground is never dug out or overwritten.
+const FILLABLE = '#minecraft:replaceable';
+// Blocks that would make a poor or unstable foundation, however much of the
+// base is made of them.
+const NOT_A_FOUNDATION = /^(air|water|lava|sand|red_sand|gravel|farmland|dirt_path|scaffolding|tnt|cake|cactus|barrel|bookshelf|chest|trapped_chest|hay_block|slime_block|honey_block)$|_slab$|_stairs$|_wall$|_fence|_pane$|glass|leaves|_carpet$|concrete_powder|ice$|snow|_door$|_trapdoor$|_shulker_box$|_ore$/;
+
+/**
+ * What to fill under a build, or null if it already sits on the ground.
+ *
+ * @param {object} verified   validatePlan's result (local coordinates)
+ * @param {object} origin     world origin; origin.y is where the build sits
+ * @param {number} lowGround  lowest free block above ground across the footprint
+ * @returns {{bottom:number, top:number, material:string, rects:object[]}|null}
+ */
+export function planFoundation(verified, origin, lowGround, { maxDepth = FOUNDATION_MAX_DEPTH, minY = -64 } = {}) {
+  if (!Number.isFinite(lowGround) || lowGround >= origin.y) return null;
+  const { spans, bounds } = verified;
+  // Drawn starting in mid-air on purpose - a sky island, a floating castle.
+  // Propping it up on a stone pillar would be wrong.
+  if (bounds.y1 > 1) return null;
+  const base = spans.filter((s) => s.y1 <= bounds.y1 + 1 && baseOf(s.material) !== 'air');
+  if (!base.length) return null;
+
+  // Rest it on the parts that touch the ground, not the whole bounding box: a
+  // courtyard or the gap between two towers stays as the land was.
+  const seen = new Set();
+  let rects = [];
+  for (const s of base) {
+    const r = { x1: s.x1 + origin.x, z1: s.z1 + origin.z, x2: s.x2 + origin.x, z2: s.z2 + origin.z };
+    const k = `${r.x1},${r.z1},${r.x2},${r.z2}`;
+    if (!seen.has(k)) { seen.add(k); rects.push(r); }
+  }
+  if (rects.length > FOUNDATION_MAX_RECTS) {
+    rects = [{
+      x1: Math.min(...rects.map((r) => r.x1)), z1: Math.min(...rects.map((r) => r.z1)),
+      x2: Math.max(...rects.map((r) => r.x2)), z2: Math.max(...rects.map((r) => r.z2)),
+    }];
+  }
+
+  // The build's own base material, if it is one that stands up as a wall of
+  // earth or stone; otherwise stone bricks.
+  const area = new Map();
+  for (const s of base) {
+    const b = baseOf(s.material);
+    area.set(b, (area.get(b) || 0) + (s.x2 - s.x1 + 1) * (s.z2 - s.z1 + 1));
+  }
+  const [dominant] = [...area.entries()].sort((a, b) => b[1] - a[1])[0];
+  const material = NOT_A_FOUNDATION.test(dominant) ? 'stone_bricks' : dominant;
+
+  const top = origin.y + bounds.y1 - 1;
+  const bottom = Math.max(lowGround, origin.y - maxDepth, minY);
+  if (bottom > top) return null;
+  return { bottom, top, material, rects };
+}
+
+export function foundationCommands(foundation) {
+  if (!foundation) return [];
+  const { bottom, top, material, rects } = foundation;
+  const spans = rects.map((r) => ({ ...r, y1: bottom, y2: top, material, mode: 'solid' }));
+  return spansToCommands(spans, { x: 0, y: 0, z: 0 }).map((c) => `${c} replace ${FILLABLE}`);
 }

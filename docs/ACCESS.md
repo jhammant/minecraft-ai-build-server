@@ -49,6 +49,36 @@ To add someone yourself:
 Geyser/Floodgate players authenticate against Xbox Live and appear with a `.`
 prefix, e.g. `.BedrockKid`. Whitelist them with the prefix included.
 
+**A brand-new Xbox account can't be whitelisted by name.** Both
+`whitelist add .Name` and `fwhitelist add Name` fail ("That player does not
+exist" / "Unable to find user in our cache"), because the name is only resolvable
+once the account has joined a Geyser server somewhere. Work from its UUID instead:
+
+1. Let them try to join once. They're turned away, but the log shows the name
+   the app is *actually* signed in with — often not the gamertag you were told.
+2. LuckPerms records that attempt before the whitelist check. Floodgate UUIDs
+   look like `00000000-0000-0000-0009-xxxxxxxxxxxx`; find the one stored next to
+   the lowercased `.name` in `plugins/LuckPerms/luckperms-h2-v2.mv.db`.
+3. `./scripts/mc cmd "fwhitelist add <uuid>"` — the list shows `unknown` until
+   they join, which is fine.
+
+The same goes for LuckPerms: `lp user .Name parent add builder` silently does
+nothing for a dot-prefixed name. Use the UUID:
+
+```bash
+./scripts/mc cmd "lp user 00000000-0000-0000-0009-xxxxxxxxxxxx parent add builder"
+```
+
+Plugin commands like `lp`, `fwhitelist` and `co` answer asynchronously, so RCON
+prints nothing either way. Check the effect, not the reply: `lp export <name>`
+writes a file you can read.
+
+**"Can't break blocks" on an iPad.** Touch reach in creative is about 12
+blocks; a Java server only accepts breaks within about 6. Taps further away
+break on the iPad and the server puts the block back
+([GeyserMC#4864](https://github.com/GeyserMC/Geyser/issues/4864)). The
+`bedrockreach` datapack raises every player's `block_interaction_range` to 12.
+
 ## Exposing the server
 
 Three things to do. Only the first is strictly required.
